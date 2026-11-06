@@ -1,0 +1,42 @@
+[package]
+name = "sentinel-service"
+description = "Sentinel-Lite endpoint protection engine (Windows service)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "sentinel-service"
+path = "src/main.rs"
+
+[dependencies]
+sentinel-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow = "1"
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util", "sync", "macros", "time", "signal"] }
+sha2 = "0.10"
+rusqlite = { version = "0.32", features = ["bundled"] }
+notify = { version = "8", default-features = false }
+getrandom = "0.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "ansi"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.8"
+winreg = "0.55"
+ferrisetw = "1.2"
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Pipes",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+tempfile = "3"

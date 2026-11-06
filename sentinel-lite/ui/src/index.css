@@ -1,0 +1,52 @@
+@import "tailwindcss";
+
+@theme {
+  --color-cyber-50: #ecfeff;
+  --color-cyber-300: #67e8f9;
+  --color-cyber-400: #22d3ee;
+  --color-cyber-500: #06b6d4;
+  --font-sans: "Inter", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+
+  --animate-shield-pulse: shield-pulse 3s ease-out infinite;
+  --animate-scan-sweep: scan-sweep 2.4s linear infinite;
+  --animate-glow: glow 4s ease-in-out infinite;
+  --animate-scan-bar: scan-bar 1.4s ease-in-out infinite;
+
+  @keyframes scan-bar {
+    from { left: -33%; }
+    to { left: 100%; }
+  }
+
+  @keyframes shield-pulse {
+    0% { transform: scale(0.85); opacity: 0.55; }
+    100% { transform: scale(1.6); opacity: 0; }
+  }
+  @keyframes scan-sweep {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+  }
+  @keyframes glow {
+    0%, 100% { filter: drop-shadow(0 0 12px var(--glow, #10b981aa)); }
+    50% { filter: drop-shadow(0 0 28px var(--glow, #10b981)); }
+  }
+}
+
+html, body, #root { height: 100%; }
+body {
+  margin: 0;
+  color: var(--color-slate-200);
+  background:
+    radial-gradient(1200px 600px at 80% -10%, #0e749022, transparent 60%),
+    radial-gradient(900px 500px at -10% 110%, #05966914, transparent 60%),
+    var(--color-slate-950);
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+
+/* Thin, dark scrollbars inside panels. */
+* { scrollbar-width: thin; scrollbar-color: #334155 transparent; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}

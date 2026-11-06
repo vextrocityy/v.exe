@@ -1,0 +1,9 @@
+{
+  "name": "core",
+  "version": "2026.11.06",
+  "description": "Bundled starter pack. Add packs (same format) to %ProgramData%\\SentinelLite\\signatures\\ and restart the service.",
+  "signatures": [
+    { "sha256": "275a021bbfb6489e54d471899f7db9d1663fc695ec2fe2a2c4538aabf651fd0f", "name": "EICAR-Test-File", "severity": "high" },
+    { "sha256": "2546dcffc5ad854d4ddc64fbf056871cd5a00f2471cb7a5bfd4ac23b6e9eedad", "name": "EICAR-Test-File.zip", "severity": "high" }
+  ]
+}

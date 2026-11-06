@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/sentinel-protocol",
+    "crates/sentinel-service",
+    "ui/src-tauri",
+]
+# `cargo build` at the root builds only the engine; the Tauri app needs its own
+# toolchain (WebView2 / webkit) and is built through `npm run tauri build`.
+default-members = ["crates/sentinel-protocol", "crates/sentinel-service"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.80"
+
+[workspace.dependencies]
+sentinel-protocol = { path = "crates/sentinel-protocol" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", default-features = false }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"   # smaller binary; the service supervisor restarts us on crash
+strip = true

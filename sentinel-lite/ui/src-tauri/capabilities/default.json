@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Main dashboard window: core events only. The app's own commands are the only bridge to the engine.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}
