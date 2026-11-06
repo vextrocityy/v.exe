@@ -1,0 +1,6 @@
+# VGuard bundled signature database
+# Format: <sha256> <threat name>
+# Extended at runtime by `vguard update` (abuse.ch MalwareBazaar feed) and by
+# user-added hashes in the data dir (signatures/custom.txt).
+275a021bbfb6489e54d471899f7db9d1663fc695ec2fe2a2c4538aabf651fd0f EICAR-Test-File
+2546dcffc5ad854d4ddc64fbf056871cd5a00f2471cb7a5bfd4ac23b6e9eedad EICAR-Test-File.zip
