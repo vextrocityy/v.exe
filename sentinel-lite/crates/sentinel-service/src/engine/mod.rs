@@ -1440,7 +1440,7 @@ rule Low_Confidence  { meta: score = 60 strings: $a = "LOW-CONFIDENCE-MARKER" co
         let profile = dir.path().join("home").join("alice");
         std::fs::create_dir_all(profile.join("Documents")).unwrap();
         assert_eq!(engine.plant_decoys_for_test(std::slice::from_ref(&profile)), 2);
-        let decoy = profile.join("Documents/!_Accounts_2026.xlsx");
+        let decoy = profile.join("Documents").join("!_Accounts_2026.xlsx");
         assert!(engine.is_decoy(&decoy));
 
         // "Ransomware": an unsigned copy of dd writing continuously.

@@ -47,8 +47,15 @@ pub struct Decoys {
     by_path: HashMap<String, Decoy>,
 }
 
+/// Comparison key: case-insensitive and separator-agnostic (Windows accepts both
+/// `\` and `/`, and file-system notifications always report `\`).
 fn key(p: &Path) -> String {
-    p.to_string_lossy().to_lowercase()
+    let s = p.to_string_lossy().to_lowercase();
+    if cfg!(windows) {
+        s.replace('/', "\\")
+    } else {
+        s
+    }
 }
 
 /// Content: an explanatory header plus random bytes (so it looks like real
@@ -243,26 +250,28 @@ pub(crate) mod tests {
             std::fs::create_dir_all(profile.join(sub)).unwrap();
         }
         // A real user file with a planned name must never be touched.
-        std::fs::write(profile.join("Pictures/!_IMG_0001.jpg"), b"real photo").unwrap();
+        std::fs::write(profile.join("Pictures").join("!_IMG_0001.jpg"), b"real photo").unwrap();
 
         let db = Database::open_in_memory().unwrap();
         let mut d = Decoys::default();
         assert_eq!(d.plant(&db, std::slice::from_ref(&profile)), 3); // 2 Documents + 1 Pictures (no Desktop)
         assert_eq!(
-            std::fs::read(profile.join("Pictures/!_IMG_0001.jpg")).unwrap(),
+            std::fs::read(profile.join("Pictures").join("!_IMG_0001.jpg")).unwrap(),
             b"real photo"
         );
         assert!(d.tampered().is_empty());
 
         // Persisted: a reload knows the same decoys.
         let reloaded = Decoys::load(&db);
-        let doc = profile.join("Documents/!_Accounts_2026.xlsx");
+        let doc = profile.join("Documents").join("!_Accounts_2026.xlsx");
         assert!(reloaded.is_decoy(&doc));
-        assert!(!reloaded.is_decoy(&profile.join("Pictures/!_IMG_0001.jpg")));
+        assert!(!reloaded.is_decoy(&profile.join("Pictures").join("!_IMG_0001.jpg")));
 
-        // "Encrypt" one decoy, delete another.
+        // "Encrypt" one decoy, delete another. (Windows will not truncate a
+        // hidden+system file with a plain create; real ransomware clears it too.)
+        crate::platform::unhide_file(&doc);
         std::fs::write(&doc, b"ENCRYPTED GARBAGE").unwrap();
-        std::fs::remove_file(profile.join("Documents/~_Scanned_Contracts.docx")).unwrap();
+        std::fs::remove_file(profile.join("Documents").join("~_Scanned_Contracts.docx")).unwrap();
         let t = reloaded.tampered();
         assert_eq!(t.len(), 2);
         assert!(t.iter().any(|(_, s)| *s == State::Modified));
@@ -274,7 +283,7 @@ pub(crate) mod tests {
         assert!(d.tampered().is_empty());
         d.remove_all(&db);
         assert!(!doc.exists());
-        assert!(profile.join("Pictures/!_IMG_0001.jpg").exists());
+        assert!(profile.join("Pictures").join("!_IMG_0001.jpg").exists());
         assert!(Decoys::load(&db).paths().is_empty());
     }
 
