@@ -97,7 +97,8 @@ try {
     Write-Host "PASS: YARA Forge rules downloaded and compiled" -ForegroundColor Green
     Invoke-Svc stop | Out-Host
     Invoke-Svc start | Out-Host
-    Wait-Until { (Status).yara_rule_count -gt 1000 } "service loaded the full YARA rule set ($((Status).yara_rule_count) rules)" 120
+    Wait-Until { (Status).yara_rule_count -gt 1000 } "service loaded the full YARA rule set" 120
+    Write-Host "      rules active: $((Status).yara_rule_count)"
 
     # --- False-positive survey: YARA Forge vs. clean Windows binaries (report only) --
     $fpDir = Join-Path $work "fp"; New-Item -ItemType Directory -Force $fpDir | Out-Null
