@@ -219,7 +219,11 @@ fn elevated_request(hex: &str) -> Result<()> {
     let req: Request = serde_json::from_slice(&raw)?;
     if !matches!(
         req,
-        Request::UpdateSettings { .. } | Request::RestoreQuarantine { .. } | Request::ProcessAction { .. }
+        Request::UpdateSettings { .. }
+            | Request::RestoreQuarantine { .. }
+            | Request::ProcessAction { .. }
+            | Request::TrustApp { .. }
+            | Request::EnableHardening { .. }
     ) {
         bail!("request type not allowed");
     }

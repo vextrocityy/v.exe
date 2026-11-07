@@ -12,7 +12,7 @@ pub const PIPE_NAME: &str = r"\\.\pipe\sentinel_lite_ipc";
 /// Hard upper bound on one frame; protects the service from memory exhaustion.
 pub const MAX_FRAME_BYTES: u32 = 4 * 1024 * 1024;
 /// Bumped on any incompatible change; the UI refuses to talk to a different version.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 /// Placeholder sent instead of stored secrets; sending it back means "unchanged".
 pub const SECRET_MASK: &str = "********";
 
@@ -95,6 +95,36 @@ pub struct EngineStatus {
     /// Compiled YARA rules currently active.
     #[serde(default)]
     pub yara_rule_count: u64,
+    /// Engine CPU use since the previous status request, % of the whole machine.
+    #[serde(default)]
+    pub cpu_percent: Option<f32>,
+    /// Machine-wide RAM in use, %.
+    #[serde(default)]
+    pub system_memory_percent: Option<f32>,
+    /// IPv4 ranges currently blocked by Network Guard.
+    #[serde(default)]
+    pub network_blocked_ranges: u64,
+    /// Windows security features Sentinel-Lite relies on (LSA protection, firewall, UAC).
+    #[serde(default)]
+    pub hardening: Vec<HardeningCheck>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HardeningCheck {
+    pub id: String,
+    pub name: String,
+    pub ok: bool,
+    pub detail: String,
+    /// The engine can switch this on (`Request::EnableHardening`).
+    pub fixable: bool,
+}
+
+/// A program the user explicitly trusts, pinned by content hash so a
+/// different file at the same path is not trusted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrustedApp {
+    pub path: String,
+    pub sha256: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -187,6 +217,16 @@ pub struct Settings {
     pub ransomware_suspend: bool,
     /// When a file is quarantined, also remove the startup entries that launch it (restored with the file).
     pub startup_cleanup: bool,
+    /// Execution Guard: stop unsigned programs started from Downloads, Temp or AppData.
+    pub block_untrusted_risky: bool,
+    /// Attack-surface rule: stop shells/script hosts launched by Office or PDF readers.
+    pub block_office_children: bool,
+    /// Treat bursts of high-entropy (encrypted-looking) rewrites as ransomware.
+    pub entropy_detection: bool,
+    /// Network Guard: block connections to known-malicious IP ranges (Windows Filtering Platform).
+    pub network_guard: bool,
+    /// Programs allowed despite Execution Guard.
+    pub trusted_apps: Vec<TrustedApp>,
 }
 
 impl Default for Settings {
@@ -220,6 +260,11 @@ impl Default for Settings {
             ransomware_decoys: true,
             ransomware_suspend: true,
             startup_cleanup: true,
+            block_untrusted_risky: true,
+            block_office_children: true,
+            entropy_detection: true,
+            network_guard: true,
+            trusted_apps: Vec::new(),
         }
     }
 }
@@ -249,6 +294,14 @@ pub enum Request {
     ProcessAction {
         pid: u32,
         action: ProcessActionKind,
+    },
+    /// Trust the program at `path` (hashed by the service) for Execution Guard.
+    TrustApp {
+        path: String,
+    },
+    /// Switch on a Windows hardening feature reported as fixable.
+    EnableHardening {
+        id: String,
     },
     GetEvents {
         limit: u32,

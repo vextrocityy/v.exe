@@ -44,6 +44,23 @@ export interface EngineStatus {
   signature_update_error: string | null;
   update_in_progress: boolean;
   yara_rule_count: number;
+  cpu_percent: number | null;
+  system_memory_percent: number | null;
+  network_blocked_ranges: number;
+  hardening: HardeningCheck[];
+}
+
+export interface HardeningCheck {
+  id: string;
+  name: string;
+  ok: boolean;
+  detail: string;
+  fixable: boolean;
+}
+
+export interface TrustedApp {
+  path: string;
+  sha256: string;
 }
 
 export type EventKind =
@@ -110,6 +127,11 @@ export interface Settings {
   ransomware_decoys: boolean;
   ransomware_suspend: boolean;
   startup_cleanup: boolean;
+  block_untrusted_risky: boolean;
+  block_office_children: boolean;
+  entropy_detection: boolean;
+  network_guard: boolean;
+  trusted_apps: TrustedApp[];
 }
 
 export type ProcessAction = "resume" | "terminate";

@@ -17,6 +17,10 @@ what it does.
 - [x] Archive scanning (ZIP / Office / ISO, nested once, bomb-proof)
 - [x] Ransomware decoys with suspend-the-heaviest-writer response (reversible)
 - [x] Startup clean-up on quarantine, reversed on restore
+- [x] Execution Guard (unsigned programs from risky folders), Office/PDF child-process rule
+- [x] Entropy-based encryption detection feeding the same suspend response
+- [x] Network Guard (WFP dynamic-session block filters, Spamhaus DROP + personal list)
+- [x] Windows hardening panel (LSA protection, firewall, UAC) and live resource meter
 - [x] Windows CI: real service install + ETW/File Shield/Process Guard/elevation smoke test + installer install/uninstall
 
 ## Known limitations

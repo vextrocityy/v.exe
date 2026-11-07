@@ -122,6 +122,33 @@ Data lives in `%ProgramData%\SentinelLite\` (`sentinel.db`, `quarantine\`, `sign
     user), Startup-folder shortcuts and services that launch it are removed. Services are disabled
     rather than deleted. Every removal is recorded, and restoring the file from quarantine puts its
     startup entries back.
+11. **Execution Guard.** A program without a valid Authenticode signature that starts from
+    Downloads, Temp, Windows\Temp or AppData\Roaming is terminated the moment ETW reports it
+    (milliseconds, not before its first instruction). Activity offers **Always allow**, which trusts
+    that exact file by SHA-256 (administrator approval).
+12. **Attack-surface rule.** cmd, PowerShell, wscript, cscript and mshta started by Word, Excel,
+    PowerPoint, Outlook, OneNote, Publisher, Visio or a PDF reader are terminated.
+13. **Encryption detection.** When File Shield sees a burst of rewrites across folders and at least
+    3 of 5 sampled files now look encrypted (Shannon entropy > 7.5 in a non-compressed format), the
+    heaviest unsigned writer is suspended, exactly like a decoy hit.
+14. **Network Guard.** Inbound and outbound IPv4 connections to Spamhaus DROP networks (refreshed
+    daily) and to your own `%ProgramData%\SentinelLite\network\blocklist.txt` are blocked with
+    Windows Filtering Platform filters. They live in a *dynamic* WFP session, so Windows removes
+    them if the service stops: it can never leave the PC offline. Private and loopback ranges are
+    never blocked.
+15. **Windows hardening panel.** The dashboard checks LSA protection (blocks LSASS credential
+    dumping), the firewall profiles and UAC, and can switch LSA protection on.
+
+### Deliberately not built (and what covers it instead)
+
+| Requested | Why not | Instead |
+|---|---|---|
+| Kernel callbacks (`PsSetCreateProcessNotifyRoutineEx`) to block *before* execution | Needs a kernel driver. Without an EV certificate and Microsoft attestation signing, Windows only loads it in test-signing mode, which lowers the security of the whole PC; a driver bug is a blue screen | ETW-based Execution Guard (stops within milliseconds) + Defender |
+| Memory hooks against LSASS dumping / reflective DLL injection | Hooking other processes from user mode is fragile and itself looks like malware; the reliable signal (ETW Threat-Intelligence) is only available to Microsoft-approved protected anti-malware | Windows LSA protection (one click in the hardening panel) + Defender |
+| Self-defense against malware running as administrator | Only a Protected Process Light (ELAM driver, Microsoft antivirus programme) can resist an administrator | SCM auto-restart; Defender's tamper protection |
+| Blocking suspicious TLDs | WFP filters see IP addresses, not domain names | A DNS filter (e.g. a filtering DNS resolver) |
+| Blocking "unauthorized outbound background connections" | Needs a per-app allow-list firewall with prompts; out of scope for a lightweight engine | Windows Firewall outbound rules |
+
 
 ### False-positive safety
 

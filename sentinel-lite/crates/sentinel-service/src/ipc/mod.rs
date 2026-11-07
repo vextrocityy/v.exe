@@ -151,6 +151,9 @@ async fn dispatch(engine: &Arc<Engine>, req: Request, peer: &Peer) -> Response {
         Request::RestoreQuarantine { .. } if !peer.elevated => {
             return elevation_required("releases a detected threat");
         }
+        Request::TrustApp { .. } if !peer.elevated => {
+            return elevation_required("lets an unsigned program run from a risky folder");
+        }
         Request::ProcessAction {
             action: ProcessActionKind::Resume,
             ..
@@ -192,6 +195,20 @@ async fn dispatch(engine: &Arc<Engine>, req: Request, peer: &Peer) -> Response {
             blocking(move || match e.process_action(pid, action) {
                 Ok(_) => Response::Ok,
                 Err(m) => Response::error(ErrorCode::NotFound, m),
+            })
+            .await
+        }
+        Request::TrustApp { path } => {
+            blocking(move || match e.trust_app(&path) {
+                Ok(()) => Response::Ok,
+                Err(err) => Response::error(ErrorCode::BadRequest, format!("{err:#}")),
+            })
+            .await
+        }
+        Request::EnableHardening { id } => {
+            blocking(move || match e.enable_hardening(&id) {
+                Ok(_) => Response::Ok,
+                Err(err) => Response::error(ErrorCode::BadRequest, format!("{err:#}")),
             })
             .await
         }

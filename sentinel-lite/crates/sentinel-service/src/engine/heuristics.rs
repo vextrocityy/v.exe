@@ -56,7 +56,13 @@ const DOCUMENT_APPS: &[&str] = &[
     "powerpnt.exe",
     "outlook.exe",
     "onenote.exe",
+    "mspub.exe",
+    "visio.exe",
     "acrord32.exe",
+    "acrobat.exe",
+    "foxitpdfreader.exe",
+    "foxitreader.exe",
+    "sumatrapdf.exe",
 ];
 
 /// Final path component, lower-cased. Splits on both separators so Windows
@@ -101,6 +107,25 @@ fn in_user_writable_location(p: &Path) -> bool {
     .any(|frag| s.contains(frag))
 }
 
+/// Attack-surface rule: a document application starting a shell / script host.
+pub fn office_spawning_shell(image: &Path, parent: &Path) -> bool {
+    SCRIPT_HOSTS.contains(&file_name_lower(image).as_str()) && DOCUMENT_APPS.contains(&file_name_lower(parent).as_str())
+}
+
+/// Folders where downloaded or dropped malware typically starts from.
+pub fn risky_location(p: &Path) -> Option<&'static str> {
+    let s = p.to_string_lossy().to_ascii_lowercase().replace('/', "\\");
+    [
+        ("\\appdata\\local\\temp\\", "Temp"),
+        ("\\windows\\temp\\", "Windows Temp"),
+        ("\\downloads\\", "Downloads"),
+        ("\\appdata\\roaming\\", "AppData\\Roaming"),
+    ]
+    .iter()
+    .find(|(frag, _)| s.contains(frag))
+    .map(|(_, name)| *name)
+}
+
 pub fn assess_process(ctx: &ProcessContext<'_>) -> Assessment {
     let mut a = Assessment::default();
     let image = file_name_lower(ctx.image);
@@ -132,6 +157,55 @@ pub fn assess_process(ctx: &ProcessContext<'_>) -> Assessment {
         a.add(10, "executable runs from a temporary / download folder");
     }
     a
+}
+
+// ---------------------------------------------------------------------------
+// Entropy (encryption) check
+// ---------------------------------------------------------------------------
+
+/// Shannon entropy in bits per byte (0..=8). Encrypted or compressed data is ~8.
+pub fn shannon_entropy(data: &[u8]) -> f64 {
+    if data.is_empty() {
+        return 0.0;
+    }
+    let mut counts = [0u64; 256];
+    for b in data {
+        counts[*b as usize] += 1;
+    }
+    let n = data.len() as f64;
+    counts
+        .iter()
+        .filter(|c| **c > 0)
+        .map(|c| {
+            let p = *c as f64 / n;
+            -p * p.log2()
+        })
+        .sum()
+}
+
+/// Formats that are compressed by design: high entropy there is normal.
+fn naturally_high_entropy(path: &Path) -> bool {
+    const EXT: &[&str] = &[
+        "zip", "7z", "rar", "gz", "xz", "bz2", "zst", "cab", "jpg", "jpeg", "png", "gif", "webp", "heic", "mp3", "mp4",
+        "m4a", "mkv", "avi", "mov", "webm", "flac", "ogg", "docx", "xlsx", "pptx", "odt", "pdf", "jar", "apk", "msi",
+        "iso", "vhdx", "pack", "idx", "woff2",
+    ];
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| EXT.contains(&e.to_ascii_lowercase().as_str()))
+}
+
+/// Does this recently modified file look encrypted? Reads at most 64 KiB.
+pub fn looks_encrypted(path: &Path) -> bool {
+    if naturally_high_entropy(path) {
+        return false;
+    }
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut buf = vec![0u8; 64 * 1024];
+    let n = std::io::Read::read(&mut f, &mut buf).unwrap_or(0);
+    n >= 512 && shannon_entropy(&buf[..n]) > 7.5
 }
 
 // ---------------------------------------------------------------------------
@@ -261,6 +335,44 @@ mod tests {
     }
 
     #[test]
+    fn asr_and_risky_location_rules() {
+        assert!(office_spawning_shell(
+            Path::new(r"C:\Windows\System32\cmd.exe"),
+            Path::new(r"C:\Program Files\Microsoft Office\root\Office16\WINWORD.EXE")
+        ));
+        assert!(office_spawning_shell(
+            Path::new(r"C:\Windows\System32\wscript.exe"),
+            Path::new(r"C:\x\AcroRd32.exe")
+        ));
+        assert!(!office_spawning_shell(
+            Path::new(r"C:\Windows\System32\cmd.exe"),
+            Path::new(r"C:\Windows\explorer.exe")
+        ));
+        assert!(!office_spawning_shell(
+            Path::new(r"C:\Windows\splwow64.exe"),
+            Path::new(r"C:\x\WINWORD.EXE")
+        ));
+
+        assert_eq!(
+            risky_location(Path::new(r"C:\Users\a\Downloads\setup.exe")),
+            Some("Downloads")
+        );
+        assert_eq!(
+            risky_location(Path::new(r"C:\Users\a\AppData\Local\Temp\x\y.exe")),
+            Some("Temp")
+        );
+        assert_eq!(
+            risky_location(Path::new(r"C:\Users\a\AppData\Roaming\z.exe")),
+            Some("AppData\\Roaming")
+        );
+        assert_eq!(risky_location(Path::new(r"C:\Program Files\App\app.exe")), None);
+        assert_eq!(
+            risky_location(Path::new(r"C:\Users\a\AppData\Local\Programs\app.exe")),
+            None
+        );
+    }
+
+    #[test]
     fn encoded_flag_prefix_matching() {
         assert!(has_encoded_command_flag("powershell -EncodedCommand AAA"));
         assert!(has_encoded_command_flag("powershell -ec AAA"));
@@ -288,6 +400,30 @@ mod tests {
         }
         let alert = alert.expect("should alert");
         assert!(alert.directories >= 4);
+    }
+
+    #[test]
+    fn entropy_separates_text_from_encrypted_data() {
+        assert!(shannon_entropy(b"aaaaaaaaaaaaaaaa") < 0.1);
+        let text = "The quick brown fox jumps over the lazy dog. ".repeat(200);
+        assert!(shannon_entropy(text.as_bytes()) < 5.0);
+        let mut random = vec![0u8; 64 * 1024];
+        getrandom::fill(&mut random).unwrap();
+        assert!(shannon_entropy(&random) > 7.9);
+
+        let dir = tempfile::tempdir().unwrap();
+        let enc = dir.path().join("report.docx.locked");
+        std::fs::write(&enc, &random).unwrap();
+        assert!(looks_encrypted(&enc));
+        let photo = dir.path().join("photo.jpg");
+        std::fs::write(&photo, &random).unwrap();
+        assert!(
+            !looks_encrypted(&photo),
+            "compressed formats are expected to be high-entropy"
+        );
+        let notes = dir.path().join("notes.txt");
+        std::fs::write(&notes, text).unwrap();
+        assert!(!looks_encrypted(&notes));
     }
 
     #[test]

@@ -89,6 +89,17 @@ async fn process_action(pid: u32, action: ProcessActionKind) -> Result<(), Strin
 }
 
 #[tauri::command]
+async fn trust_app(path: String) -> Result<(), String> {
+    call_privileged(Request::TrustApp { path }).await.map(|_| ())
+}
+
+#[tauri::command]
+async fn enable_hardening(id: String) -> Result<(), String> {
+    // Writes HKLM via the SYSTEM service; ask for elevation if the service wants it.
+    call_privileged(Request::EnableHardening { id }).await.map(|_| ())
+}
+
+#[tauri::command]
 async fn get_events(limit: Option<u32>, before_id: Option<i64>) -> Result<Vec<SecurityEvent>, String> {
     match call(Request::GetEvents {
         limit: limit.unwrap_or(100),
@@ -274,6 +285,8 @@ pub fn run() {
             acknowledge_threats,
             update_signatures,
             process_action,
+            trust_app,
+            enable_hardening,
             get_events,
             list_quarantine,
             restore_quarantine,

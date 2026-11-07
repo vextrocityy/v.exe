@@ -35,7 +35,13 @@ const settings: Settings = {
   ransomware_decoys: true,
   ransomware_suspend: true,
   startup_cleanup: true,
+  block_untrusted_risky: true,
+  block_office_children: true,
+  entropy_detection: true,
+  network_guard: true,
+  trusted_apps: [{ path: "C:\\Users\\alex\\Downloads\\tools\\putty.exe", sha256: "9f".repeat(32) }],
 };
+let lsaOn = false;
 let lastUpdate = now() - 3 * 3600;
 let updating = false;
 
@@ -51,6 +57,7 @@ let quarantine: QuarantineItem[] = [
 ];
 
 const events: SecurityEvent[] = [
+  { id: 6, timestamp: now() - 300, kind: "process_blocked", severity: "high", title: "Blocked unsigned program from Downloads", detail: "Execution Guard stops programs without a valid digital signature when they start from Downloads, where malware usually lands. If you trust it, choose Always allow.", path: "C:\\Users\\alex\\Downloads\\cool-tool.exe", pid: 9120 },
   { id: 5, timestamp: now() - 600, kind: "process_suspended", severity: "critical", title: "Suspended encryptor.exe", detail: "It wrote 48.2 MB in 1 second right after the decoy changed. It is frozen, not killed: choose Terminate (and quarantine it) or Resume in Activity.", path: "C:\\Users\\alex\\AppData\\Local\\Temp\\encryptor.exe", pid: 7344 },
   { id: 4, timestamp: now() - 601, kind: "behavior_alert", severity: "critical", title: "Ransomware behaviour: a decoy file was changed", detail: "A hidden decoy file was modified. Legitimate programs never touch it.", path: "C:\\Users\\alex\\Documents\\!_Accounts_2026.xlsx", pid: null },
   { id: 3, timestamp: now() - 5400, kind: "threat_quarantined", severity: "info", title: "EICAR-Test-File moved to quarantine", detail: null, path: quarantine[0].original_path, pid: null },
@@ -82,6 +89,7 @@ function status(): EngineStatus {
       { name: "Persistence Watch", enabled: settings.persistence_monitor, running: settings.realtime_protection && settings.persistence_monitor, detail: "Checking autostart locations every 30 s" },
       { name: "Behavior Engine", enabled: settings.behavior_monitor, running: settings.realtime_protection && settings.behavior_monitor, detail: "Process lineage + mass file-modification detection" },
       { name: "YARA Rules", enabled: settings.yara_enabled, running: settings.yara_enabled, detail: "5134 rules (precompiled)" },
+      { name: "Network Guard", enabled: settings.network_guard, running: settings.realtime_protection && settings.network_guard, detail: "Blocking 1489 malicious IP ranges (Spamhaus DROP + your list)" },
     ],
     signature_count: 48213,
     threats_blocked_total: 3,
@@ -93,6 +101,14 @@ function status(): EngineStatus {
     signature_update_error: null,
     update_in_progress: updating,
     yara_rule_count: settings.yara_enabled ? 5134 : 0,
+    cpu_percent: 0.1 + Math.random() * 0.3,
+    system_memory_percent: 41 + Math.random() * 2,
+    network_blocked_ranges: settings.network_guard ? 1489 : 0,
+    hardening: [
+      { id: "lsa_protection", name: "LSA protection (credential theft)", ok: lsaOn, detail: lsaOn ? "LSASS runs as a protected process." : "Off. Turning it on stops tools like Mimikatz from reading passwords out of LSASS memory. Takes effect after a restart.", fixable: !lsaOn },
+      { id: "firewall", name: "Windows Firewall", ok: true, detail: "On for all network profiles.", fixable: false },
+      { id: "uac", name: "User Account Control", ok: true, detail: "On: programs need approval to get administrator rights.", fixable: false },
+    ],
   };
 }
 
@@ -126,6 +142,12 @@ export const mock = {
         case "start_scan": return startScan(args.kind as ScanKind);
         case "cancel_scan": return scan.running ? finishScan(true) : undefined;
         case "acknowledge_threats": return undefined;
+        case "trust_app":
+          settings.trusted_apps = [...settings.trusted_apps, { path: args.path as string, sha256: "ab".repeat(32) }];
+          return undefined;
+        case "enable_hardening":
+          lsaOn = true;
+          return undefined;
         case "process_action":
           push({ kind: args.action === "terminate" ? "process_blocked" : "service_info", severity: "high", title: args.action === "terminate" ? "Process terminated by user" : "Process resumed by user", detail: null, path: null, pid: args.pid as number });
           return undefined;

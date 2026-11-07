@@ -273,6 +273,110 @@ mod imp {
         set_dacl(path, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;IU)")
     }
 
+    /// CPU time (user + kernel) consumed by this process so far.
+    pub fn own_cpu_time() -> Option<std::time::Duration> {
+        use windows_sys::Win32::Foundation::FILETIME;
+        use windows_sys::Win32::System::Threading::GetProcessTimes;
+        unsafe {
+            let (mut c, mut e, mut k, mut u): (FILETIME, FILETIME, FILETIME, FILETIME) = std::mem::zeroed();
+            if GetProcessTimes(GetCurrentProcess(), &mut c, &mut e, &mut k, &mut u) == 0 {
+                return None;
+            }
+            let t = |f: FILETIME| ((f.dwHighDateTime as u64) << 32) | f.dwLowDateTime as u64;
+            Some(std::time::Duration::from_nanos((t(k) + t(u)) * 100))
+        }
+    }
+
+    pub fn system_memory_percent() -> Option<f32> {
+        use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+        unsafe {
+            let mut m: MEMORYSTATUSEX = std::mem::zeroed();
+            m.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+            (GlobalMemoryStatusEx(&mut m) != 0).then_some(m.dwMemoryLoad as f32)
+        }
+    }
+
+    fn reg_dword(path: &str, name: &str) -> Option<u32> {
+        use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ};
+        winreg::RegKey::predef(HKEY_LOCAL_MACHINE)
+            .open_subkey_with_flags(path, KEY_READ)
+            .ok()?
+            .get_value(name)
+            .ok()
+    }
+
+    /// Windows features that cover what a user-mode engine cannot: LSASS
+    /// memory protection, the firewall, and UAC.
+    pub fn hardening_checks() -> Vec<sentinel_protocol::HardeningCheck> {
+        use sentinel_protocol::HardeningCheck;
+        let lsa = reg_dword(r"SYSTEM\CurrentControlSet\Control\Lsa", "RunAsPPL").unwrap_or(0);
+        let fw: Vec<bool> = ["DomainProfile", "StandardProfile", "PublicProfile"]
+            .iter()
+            .map(|p| {
+                reg_dword(
+                    &format!(r"SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\{p}"),
+                    "EnableFirewall",
+                )
+                .unwrap_or(1)
+                    == 1
+            })
+            .collect();
+        let uac = reg_dword(
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System",
+            "EnableLUA",
+        )
+        .unwrap_or(1);
+        vec![
+            HardeningCheck {
+                id: "lsa_protection".into(),
+                name: "LSA protection (credential theft)".into(),
+                ok: lsa == 1 || lsa == 2,
+                detail: if lsa == 1 || lsa == 2 {
+                    "LSASS runs as a protected process: credential-dumping tools cannot read its memory.".into()
+                } else {
+                    "Off. Turning it on stops tools like Mimikatz from reading passwords out of LSASS memory. Takes effect after a restart.".into()
+                },
+                fixable: !(lsa == 1 || lsa == 2),
+            },
+            HardeningCheck {
+                id: "firewall".into(),
+                name: "Windows Firewall".into(),
+                ok: fw.iter().all(|x| *x),
+                detail: if fw.iter().all(|x| *x) {
+                    "On for all network profiles.".into()
+                } else {
+                    "Off for at least one network profile (Windows Security → Firewall).".into()
+                },
+                fixable: false,
+            },
+            HardeningCheck {
+                id: "uac".into(),
+                name: "User Account Control".into(),
+                ok: uac == 1,
+                detail: if uac == 1 {
+                    "On: programs need approval to get administrator rights.".into()
+                } else {
+                    "Off: every program runs with full rights.".into()
+                },
+                fixable: false,
+            },
+        ]
+    }
+
+    /// Switch on a fixable hardening feature (requires SYSTEM / admin).
+    pub fn enable_hardening(id: &str) -> anyhow::Result<String> {
+        use winreg::enums::HKEY_LOCAL_MACHINE;
+        match id {
+            "lsa_protection" => {
+                let (key, _) = winreg::RegKey::predef(HKEY_LOCAL_MACHINE)
+                    .create_subkey(r"SYSTEM\CurrentControlSet\Control\Lsa")?;
+                key.set_value("RunAsPPL", &1u32)?;
+                Ok("LSA protection enabled. Restart Windows to apply it.".into())
+            }
+            other => anyhow::bail!("{other} cannot be changed automatically"),
+        }
+    }
+
     /// Total bytes written by `pid` since it started.
     pub fn write_bytes(pid: u32) -> Option<u64> {
         use windows_sys::Win32::System::Threading::{GetProcessIoCounters, IO_COUNTERS};
@@ -414,6 +518,36 @@ mod imp {
 
     pub fn has_valid_signature(_path: &std::path::Path) -> bool {
         false
+    }
+
+    pub fn own_cpu_time() -> Option<std::time::Duration> {
+        let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+        let rest = &stat[stat.rfind(')')? + 2..];
+        let f: Vec<&str> = rest.split_whitespace().collect();
+        let ticks: u64 = f.get(11)?.parse::<u64>().ok()? + f.get(12)?.parse::<u64>().ok()?;
+        Some(std::time::Duration::from_millis(ticks * 10)) // USER_HZ = 100
+    }
+
+    pub fn system_memory_percent() -> Option<f32> {
+        let info = std::fs::read_to_string("/proc/meminfo").ok()?;
+        let get = |k: &str| {
+            info.lines()
+                .find(|l| l.starts_with(k))?
+                .split_whitespace()
+                .nth(1)?
+                .parse::<f32>()
+                .ok()
+        };
+        let (total, avail) = (get("MemTotal:")?, get("MemAvailable:")?);
+        Some((1.0 - avail / total) * 100.0)
+    }
+
+    pub fn hardening_checks() -> Vec<sentinel_protocol::HardeningCheck> {
+        Vec::new()
+    }
+
+    pub fn enable_hardening(id: &str) -> anyhow::Result<String> {
+        anyhow::bail!("{id}: hardening changes are Windows-only")
     }
 
     pub fn write_bytes(pid: u32) -> Option<u64> {

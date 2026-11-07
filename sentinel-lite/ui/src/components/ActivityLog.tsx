@@ -49,6 +49,7 @@ export function ActivityLog({ events, limit, compact }: { events: SecurityEvent[
               {e.path && <p className="truncate font-mono text-xs text-slate-500" title={e.path}>{shortPath(e.path, compact ? 56 : 96)}</p>}
               {!compact && e.detail && <p className="mt-0.5 text-xs text-slate-400">{e.detail}</p>}
               {e.kind === "process_suspended" && e.pid != null && <SuspendedActions pid={e.pid} />}
+              {e.kind === "process_blocked" && e.title.startsWith("Blocked unsigned program") && e.path && <AllowButton path={e.path} />}
             </div>
           </li>
         );
@@ -83,6 +84,32 @@ function SuspendedActions({ pid }: { pid: number }) {
         <Play className="h-3.5 w-3.5" /> Resume (it's safe)
       </button>
       {msg && <span className="text-xs text-rose-400">{msg}</span>}
+    </div>
+  );
+}
+
+/** Execution Guard blocked an unsigned program; let the user trust this exact file. */
+function AllowButton({ path }: { path: string }) {
+  const [state, setState] = useState<"idle" | "busy" | "done">("idle");
+  const [err, setErr] = useState<string | null>(null);
+  const allow = async () => {
+    setState("busy");
+    setErr(null);
+    try {
+      await api.trustApp(path);
+      setState("done");
+    } catch (e) {
+      setState("idle");
+      setErr(String(e));
+    }
+  };
+  if (state === "done") return <p className="mt-2 text-xs text-emerald-400">Trusted. Start it again; it will be allowed from now on.</p>;
+  return (
+    <div className="mt-2 flex items-center gap-2">
+      <button disabled={state === "busy"} onClick={allow} title="Requires administrator approval" className="rounded-md border border-slate-700 px-2.5 py-1 text-xs text-slate-300 hover:border-emerald-400/50 hover:text-emerald-300 disabled:opacity-50">
+        Always allow this program
+      </button>
+      {err && <span className="text-xs text-rose-400">{err}</span>}
     </div>
   );
 }

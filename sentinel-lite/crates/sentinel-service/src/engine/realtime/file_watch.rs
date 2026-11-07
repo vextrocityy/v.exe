@@ -6,7 +6,7 @@
 //! minifilter is the Phase-2 replacement that can block writes inline.
 
 use super::{ShieldHandle, FILE_SHIELD};
-use crate::engine::heuristics::{FileActivity, RansomwareDetector};
+use crate::engine::heuristics::{self, FileActivity, RansomwareDetector};
 use crate::engine::{targets, Engine};
 use notify::event::{ModifyKind, RenameMode};
 use notify::{EventKind as NEvent, RecursiveMode, Watcher};
@@ -75,7 +75,22 @@ pub fn start(engine: Arc<Engine>) -> Result<ShieldHandle, String> {
                             if behavior {
                                 if let Some(activity) = activity {
                                     if let Some(alert) = ransomware.record(&path, activity) {
-                                        raise_ransomware_alert(&engine, &alert);
+                                        // Rate + spread alone is suspicious; encrypted-looking
+                                        // content makes it ransomware: freeze the writer.
+                                        let encrypted = if engine.settings().entropy_detection {
+                                            alert
+                                                .sample_paths
+                                                .iter()
+                                                .filter(|p| heuristics::looks_encrypted(p))
+                                                .count()
+                                        } else {
+                                            0
+                                        };
+                                        if encrypted >= 3 {
+                                            engine.on_mass_encryption(alert.sample_paths.clone(), encrypted);
+                                        } else {
+                                            raise_ransomware_alert(&engine, &alert);
+                                        }
                                     }
                                 }
                             }

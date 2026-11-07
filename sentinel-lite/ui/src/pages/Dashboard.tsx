@@ -1,12 +1,14 @@
 import { useState } from "react";
-import { Cpu, Database, Lock, RefreshCw, ShieldOff } from "lucide-react";
+import { Database, Lock, RefreshCw, ShieldOff } from "lucide-react";
+import { HardeningPanel } from "../components/HardeningPanel";
+import { ResourceCard } from "../components/ResourceCard";
 import { ActivityLog } from "../components/ActivityLog";
 import { Panel } from "../components/Panel";
 import { ScanPanel } from "../components/ScanPanel";
 import { ShieldHero } from "../components/ShieldHero";
 import { StatCard } from "../components/StatCard";
 import { api } from "../lib/api";
-import { formatBytes, formatNumber, formatUptime, timeAgo } from "../lib/format";
+import { formatNumber, timeAgo } from "../lib/format";
 import type { EngineStatus, SecurityEvent } from "../lib/types";
 
 function signatureHint(status: EngineStatus | null): { text: string; warn: boolean } {
@@ -63,7 +65,7 @@ export function Dashboard({ status, events, refresh, onSeeAll }: { status: Engin
             </button>
           }
         />
-        <StatCard icon={Cpu} accent="emerald" label="Engine memory" value={formatBytes(status?.memory_bytes)} hint={status ? `Up ${formatUptime(status.uptime_secs)}` : undefined} />
+        <ResourceCard status={status} />
       </div>
 
       <div className="grid grid-cols-[1fr_340px] gap-6">
@@ -84,6 +86,7 @@ export function Dashboard({ status, events, refresh, onSeeAll }: { status: Engin
           </ul>
         </Panel>
       </div>
+      <HardeningPanel checks={status?.hardening ?? []} onChanged={refresh} />
     </div>
   );
 }

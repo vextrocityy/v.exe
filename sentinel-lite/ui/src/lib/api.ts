@@ -20,6 +20,8 @@ export const api = {
   acknowledgeThreats: () => invoke<void>("acknowledge_threats"),
   updateSignatures: () => invoke<void>("update_signatures"),
   processAction: (pid: number, action: ProcessAction) => invoke<void>("process_action", { pid, action }),
+  trustApp: (path: string) => invoke<void>("trust_app", { path }),
+  enableHardening: (id: string) => invoke<void>("enable_hardening", { id }),
   getEvents: (limit = 100, beforeId?: number) => invoke<SecurityEvent[]>("get_events", { limit, beforeId }),
   listQuarantine: () => invoke<QuarantineItem[]>("list_quarantine"),
   restoreQuarantine: (id: string) => invoke<void>("restore_quarantine", { id }),

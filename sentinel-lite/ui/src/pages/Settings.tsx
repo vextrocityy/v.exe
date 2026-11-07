@@ -121,6 +121,39 @@ export function SettingsPage() {
         </Row>
       </Panel>
 
+      <Panel title="Execution & network">
+        <Row label="Execution Guard" hint="Stop programs without a valid digital signature when they start from Downloads, Temp or AppData. Allow trusted ones from Activity.">
+          <Toggle label="Execution Guard" checked={s.block_untrusted_risky} disabled={!s.realtime_protection} onChange={(v) => set("block_untrusted_risky", v)} />
+        </Row>
+        <Row label="Block Office/PDF launching shells" hint="Stop cmd, PowerShell, wscript and mshta when started by Word, Excel, Outlook, PowerPoint or a PDF reader (macro and exploit attacks).">
+          <Toggle label="Block Office/PDF launching shells" checked={s.block_office_children} disabled={!s.realtime_protection} onChange={(v) => set("block_office_children", v)} />
+        </Row>
+        <Row label="Encryption detection" hint="A burst of rewrites across folders whose new content looks encrypted (high entropy) freezes the writing program.">
+          <Toggle label="Encryption detection" checked={s.entropy_detection} onChange={(v) => set("entropy_detection", v)} />
+        </Row>
+        <Row label="Network Guard" hint="Block connections to known-criminal networks (Spamhaus DROP, updated daily) plus your own list, via Windows Filtering Platform.">
+          <Toggle label="Network Guard" checked={s.network_guard} disabled={!s.realtime_protection} onChange={(v) => set("network_guard", v)} />
+        </Row>
+        <div className="px-5 py-4">
+          <p className="text-sm text-slate-200">Trusted programs</p>
+          <p className="text-xs text-slate-500">Allowed despite Execution Guard. Trust is tied to the exact file: an updated version asks again.</p>
+          {s.trusted_apps.length === 0 ? (
+            <p className="mt-2 text-xs text-slate-600">None yet.</p>
+          ) : (
+            <ul className="mt-2 space-y-1.5">
+              {s.trusted_apps.map((t) => (
+                <li key={t.sha256} className="flex items-center justify-between rounded-lg bg-slate-800/40 px-3 py-2">
+                  <span className="truncate font-mono text-xs text-slate-300" title={`SHA-256 ${t.sha256}`}>{t.path}</span>
+                  <button aria-label={`Stop trusting ${t.path}`} onClick={() => set("trusted_apps", s.trusted_apps.filter((x) => x.sha256 !== t.sha256))} className="text-slate-500 hover:text-rose-400">
+                    <X className="h-4 w-4" />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </Panel>
+
       <Panel title="Ransomware, archives & clean-up">
         <Row label="Scan inside archives" hint="Look inside ZIP files (including Office documents) and ISO/IMG disk images. A malicious file inside quarantines the whole archive.">
           <Toggle label="Scan inside archives" checked={s.archive_scanning} onChange={(v) => set("archive_scanning", v)} />

@@ -51,6 +51,10 @@ pub fn sanitize(mut s: Settings) -> Settings {
     });
     s.yara_min_remediate_score = s.yara_min_remediate_score.clamp(50, 101); // 101 = never quarantine
     s.yara_max_file_mb = s.yara_max_file_mb.clamp(1, 256);
+    s.trusted_apps
+        .retain(|t| crate::database::signatures::is_sha256(&t.sha256));
+    s.trusted_apps.dedup();
+    s.trusted_apps.truncate(512);
     clean(&mut s.exclusions);
     clean(&mut s.watch_paths);
     // Excluding a whole drive root is almost certainly a mistake (or an attack).
@@ -88,7 +92,7 @@ pub fn is_allowed_update_url(u: &str) -> bool {
 /// Empty = the change is neutral or strengthening and needs no elevation.
 pub fn weakenings(old: &Settings, new: &Settings) -> Vec<String> {
     let mut out = Vec::new();
-    let flags: [(&str, bool, bool); 15] = [
+    let flags: [(&str, bool, bool); 19] = [
         ("real-time protection", old.realtime_protection, new.realtime_protection),
         ("Process Guard", old.process_monitor, new.process_monitor),
         ("File Shield", old.file_monitor, new.file_monitor),
@@ -108,6 +112,14 @@ pub fn weakenings(old: &Settings, new: &Settings) -> Vec<String> {
         ("ransomware decoys", old.ransomware_decoys, new.ransomware_decoys),
         ("suspending ransomware", old.ransomware_suspend, new.ransomware_suspend),
         ("startup clean-up", old.startup_cleanup, new.startup_cleanup),
+        ("Execution Guard", old.block_untrusted_risky, new.block_untrusted_risky),
+        (
+            "the Office child-process rule",
+            old.block_office_children,
+            new.block_office_children,
+        ),
+        ("entropy detection", old.entropy_detection, new.entropy_detection),
+        ("Network Guard", old.network_guard, new.network_guard),
     ];
     for (name, before, after) in flags {
         if before && !after {
@@ -129,6 +141,9 @@ pub fn weakenings(old: &Settings, new: &Settings) -> Vec<String> {
     }
     if !new.scheduled_scan && old.scheduled_scan {
         out.push("turns off scheduled scans".into());
+    }
+    if new.trusted_apps.iter().any(|t| !old.trusted_apps.contains(t)) {
+        out.push("trusts additional programs".into());
     }
     let removed_watch = old.watch_paths.iter().any(|w| !new.watch_paths.contains(w));
     if removed_watch {

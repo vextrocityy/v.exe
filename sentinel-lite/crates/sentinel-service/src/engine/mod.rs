@@ -4,6 +4,7 @@
 pub mod archive;
 pub mod hasher;
 pub mod heuristics;
+pub mod netguard;
 pub mod quarantine;
 pub mod realtime;
 pub mod scanner;
@@ -82,6 +83,8 @@ pub struct Engine {
     /// Processes we suspended, awaiting the user's decision.
     suspended: Mutex<std::collections::HashMap<u32, PathBuf>>,
     last_decoy_response: Mutex<Option<Instant>>,
+    firewall: Mutex<Option<netguard::Firewall>>,
+    cpu_sample: Mutex<Option<(Instant, std::time::Duration)>>,
     started: Instant,
 }
 
@@ -112,6 +115,8 @@ impl Engine {
             decoys: Mutex::new(decoys),
             suspended: Mutex::new(std::collections::HashMap::new()),
             last_decoy_response: Mutex::new(None),
+            firewall: Mutex::new(None),
+            cpu_sample: Mutex::new(None),
             started: Instant::now(),
         }))
     }
@@ -607,6 +612,17 @@ impl Engine {
         });
         let mut out = out;
         let mut yara_ok = false;
+        if settings.network_guard && now_unix() - self.db.counter("last_drop_update") as i64 >= 86_400 {
+            match netguard::update_drop(&self.paths.data) {
+                Ok(n) => {
+                    self.db.set_counter("last_drop_update", now_unix());
+                    out.notes.push(format!("Spamhaus DROP: {n} ranges"));
+                    self.refresh_network_guard();
+                    yara_ok = true; // a channel succeeded
+                }
+                Err(e) => out.errors.push(format!("Spamhaus DROP: {e:#}")),
+            }
+        }
         if settings.yara_enabled && settings.yara_rules_feed {
             match crate::util::contain("YARA feed update", || self.update_yara_feed(update::YARA_FORGE_CORE)) {
                 Some(Ok(note)) => {
@@ -682,9 +698,108 @@ impl Engine {
     // ----- real-time ---------------------------------------------------------------
 
     pub fn start_realtime(self: &Arc<Self>) {
-        let statuses = lock(&self.realtime).start(self);
+        let mut statuses = lock(&self.realtime).start(self);
+        statuses.push(self.apply_network_guard());
         *self.shields.write().unwrap_or_else(|e| e.into_inner()) = statuses;
         crate::util::contain("decoy sync", || self.sync_decoys());
+    }
+
+    /// (Re)install Network Guard's WFP filters from the current lists.
+    fn apply_network_guard(&self) -> ShieldStatus {
+        let s = self.settings();
+        let enabled = s.realtime_protection && s.network_guard;
+        let mut fw = lock(&self.firewall);
+        *fw = None; // closing the old session removes its filters first
+        let mut status = ShieldStatus {
+            name: "Network Guard".into(),
+            enabled,
+            running: false,
+            detail: None,
+        };
+        if !enabled {
+            return status;
+        }
+        let ranges = netguard::load_ranges(&self.paths.data);
+        match netguard::Firewall::install(&ranges) {
+            Ok(f) => {
+                status.running = true;
+                status.detail = Some(if f.ranges == 0 {
+                    "No block list yet: Spamhaus DROP downloads with the next update".into()
+                } else {
+                    format!("Blocking {} malicious IP ranges (Spamhaus DROP + your list)", f.ranges)
+                });
+                *fw = Some(f);
+            }
+            Err(e) => {
+                tracing::error!(error = %format!("{e:#}"), "Network Guard could not install filters");
+                status.detail = Some(format!("{e:#}"));
+            }
+        }
+        status
+    }
+
+    fn refresh_network_guard(&self) {
+        let status = self.apply_network_guard();
+        let mut shields = self.shields.write().unwrap_or_else(|e| e.into_inner());
+        shields.retain(|s| s.name != status.name);
+        shields.push(status);
+    }
+
+    /// Trust a program for Execution Guard, pinned to its current content hash.
+    pub fn trust_app(self: &Arc<Self>, path: &str) -> anyhow::Result<()> {
+        let (sha256, _) =
+            hasher::sha256_file(Path::new(path), u64::MAX).map_err(|r| anyhow::anyhow!("cannot read {path}: {r:?}"))?;
+        let mut s = self.settings();
+        let app = TrustedApp {
+            path: path.to_string(),
+            sha256,
+        };
+        if !s.trusted_apps.contains(&app) {
+            s.trusted_apps.push(app);
+        }
+        self.update_settings(s)?;
+        self.emit(
+            EventKind::SettingsChanged,
+            Severity::Medium,
+            "Program trusted by user",
+            None,
+            Some(Path::new(path)),
+            None,
+        );
+        Ok(())
+    }
+
+    pub fn is_trusted_app(&self, sha256: &str) -> bool {
+        self.settings
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .trusted_apps
+            .iter()
+            .any(|t| t.sha256 == sha256)
+    }
+
+    pub fn enable_hardening(&self, id: &str) -> anyhow::Result<String> {
+        let msg = crate::platform::enable_hardening(id)?;
+        self.emit(
+            EventKind::SettingsChanged,
+            Severity::Info,
+            "Windows hardening changed",
+            Some(msg.clone()),
+            None,
+            None,
+        );
+        Ok(msg)
+    }
+
+    fn cpu_percent(&self) -> Option<f32> {
+        let now = (Instant::now(), crate::platform::own_cpu_time()?);
+        let prev = lock(&self.cpu_sample).replace(now)?;
+        let wall = now.0.duration_since(prev.0).as_secs_f32();
+        if wall < 0.2 {
+            return None;
+        }
+        let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1) as f32;
+        Some(((now.1.saturating_sub(prev.1)).as_secs_f32() / wall / cpus * 100.0).min(100.0))
     }
 
     // ----- ransomware decoys -------------------------------------------------------------
@@ -733,7 +848,7 @@ impl Engine {
     }
 
     /// Never suspend the OS, ourselves, excluded or validly code-signed programs.
-    fn may_suspend(&self, pid: u32, image: &Path) -> bool {
+    pub(crate) fn may_suspend(&self, pid: u32, image: &Path) -> bool {
         if pid <= 4 || pid == std::process::id() || self.is_excluded(image) {
             return false;
         }
@@ -776,47 +891,86 @@ impl Engine {
             None,
         );
         if self.settings().ransomware_suspend {
-            let suspects =
-                realtime::decoy::heaviest_writers(std::time::Duration::from_secs(1), 512 * 1024, |pid, img| {
-                    self.may_suspend(pid, img)
-                });
-            match suspects.first() {
-                Some(s) if crate::platform::suspend(s.pid) => {
-                    lock(&self.suspended).insert(s.pid, s.image.clone());
-                    self.emit(
-                        EventKind::ProcessSuspended,
-                        Severity::Critical,
-                        format!(
-                            "Suspended {}",
-                            s.image.file_name().unwrap_or_default().to_string_lossy()
-                        ),
-                        Some(format!(
-                            "It wrote {:.1} MB in 1 second right after the decoy changed. It is frozen, not killed: \
-                             choose Terminate (and quarantine it) or Resume in Activity.",
-                            s.bytes_written as f64 / 1e6
-                        )),
-                        Some(&s.image),
-                        Some(s.pid),
-                    );
-                }
-                Some(s) => tracing::warn!(pid = s.pid, "could not suspend ransomware suspect"),
-                None => {
-                    self.emit(
-                        EventKind::BehaviorAlert,
-                        Severity::High,
-                        "No process could be suspended",
-                        Some(
-                            "No unsigned, non-system program was writing heavily. Windows components and signed \
-                             programs are never suspended automatically."
-                                .into(),
-                        ),
-                        Some(path),
-                        None,
-                    );
-                }
-            }
+            self.suspend_heaviest_writer(path, "the decoy changed");
         }
         lock(&self.decoys).replant(&self.db);
+    }
+
+    /// Freeze the heaviest eligible writer right now (shared by the decoy and
+    /// entropy detectors). Reversible: the user terminates or resumes it.
+    fn suspend_heaviest_writer(&self, trigger: &Path, reason: &str) {
+        let suspects = realtime::decoy::heaviest_writers(std::time::Duration::from_secs(1), 512 * 1024, |pid, img| {
+            self.may_suspend(pid, img)
+        });
+        match suspects.first() {
+            Some(s) if crate::platform::suspend(s.pid) => {
+                lock(&self.suspended).insert(s.pid, s.image.clone());
+                self.emit(
+                    EventKind::ProcessSuspended,
+                    Severity::Critical,
+                    format!(
+                        "Suspended {}",
+                        s.image.file_name().unwrap_or_default().to_string_lossy()
+                    ),
+                    Some(format!(
+                        "It wrote {:.1} MB in 1 second right after {reason}. It is frozen, not killed: \
+                         choose Terminate (and quarantine it) or Resume in Activity.",
+                        s.bytes_written as f64 / 1e6
+                    )),
+                    Some(&s.image),
+                    Some(s.pid),
+                );
+            }
+            Some(s) => tracing::warn!(pid = s.pid, "could not suspend ransomware suspect"),
+            None => {
+                self.emit(
+                    EventKind::BehaviorAlert,
+                    Severity::High,
+                    "No process could be suspended",
+                    Some(
+                        "No unsigned, non-system program was writing heavily. Windows components and signed \
+                         programs are never suspended automatically."
+                            .into(),
+                    ),
+                    Some(trigger),
+                    None,
+                );
+            }
+        }
+    }
+
+    /// File Shield saw a burst of rewrites across folders and most of the
+    /// sampled files now look encrypted (high entropy, not a compressed format).
+    pub fn on_mass_encryption(self: &Arc<Self>, samples: Vec<PathBuf>, encrypted: usize) {
+        let e = self.clone();
+        let _ = std::thread::Builder::new().name("entropy-response".into()).spawn(move || {
+            crate::util::contain("entropy response", || {
+                {
+                    let mut last = lock(&e.last_decoy_response);
+                    if last.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(15)) {
+                        return;
+                    }
+                    *last = Some(Instant::now());
+                }
+                let first = samples.first().cloned().unwrap_or_default();
+                e.emit(
+                    EventKind::BehaviorAlert,
+                    Severity::Critical,
+                    "Ransomware behaviour: files are being encrypted",
+                    Some(format!(
+                        "Many files across several folders were rewritten in seconds, and {encrypted} of {} sampled now \
+                         contain encrypted-looking data. Recent: {}",
+                        samples.len(),
+                        samples.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
+                    )),
+                    Some(&first),
+                    None,
+                );
+                if e.settings().ransomware_suspend {
+                    e.suspend_heaviest_writer(&first, "the encryption burst");
+                }
+            });
+        });
     }
 
     /// The user's decision on a suspended process.
@@ -986,6 +1140,10 @@ impl Engine {
             signature_update_error: self.db.meta("update_error"),
             update_in_progress: self.update_running(),
             yara_rule_count: yara_rules.map(|r| r.rule_count as u64).unwrap_or(0),
+            cpu_percent: self.cpu_percent(),
+            system_memory_percent: crate::platform::system_memory_percent(),
+            network_blocked_ranges: lock(&self.firewall).as_ref().map(|f| f.ranges as u64).unwrap_or(0),
+            hardening: crate::platform::hardening_checks(),
         }
     }
 }
@@ -1199,6 +1357,77 @@ rule Low_Confidence  { meta: score = 60 strings: $a = "LOW-CONFIDENCE-MARKER" co
         assert!(malware.exists());
         assert!(shortcut.exists(), "shortcut restored together with the file");
         assert_eq!(engine.db.quarantine_count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn encryption_burst_through_file_shield_suspends_the_writer() {
+        let _serial = realtime::decoy::tests::WRITER_TESTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let docs = dir.path().join("docs");
+        let paths = AppPaths::new(dir.path().join("data"));
+        paths.create_all().unwrap();
+        let s = Settings {
+            realtime_protection: true,
+            process_monitor: false,
+            persistence_monitor: false,
+            network_guard: false,
+            watch_paths: vec![docs.display().to_string()],
+            ..Settings::default()
+        };
+        for i in 0..4 {
+            std::fs::create_dir_all(docs.join(format!("folder{i}"))).unwrap();
+        }
+        let engine = Engine::new(paths, Database::open_in_memory().unwrap(), s).unwrap();
+        engine.start_realtime();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        let fake = dir.path().join("locker");
+        std::fs::copy("/bin/dd", &fake).unwrap();
+        let mut child = std::process::Command::new(&fake)
+            .args(["if=/dev/zero", "of=/dev/null", "bs=1M"])
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        // "Encrypt" 100 documents across 4 folders in a burst.
+        for n in 0..100 {
+            let mut data = vec![0u8; 8192];
+            getrandom::fill(&mut data).unwrap();
+            std::fs::write(
+                docs.join(format!("folder{}", n % 4)).join(format!("report{n}.txt")),
+                &data,
+            )
+            .unwrap();
+        }
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        let mut suspended = false;
+        while Instant::now() < deadline && !suspended {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            suspended = engine
+                .db
+                .recent_events(20, None)
+                .unwrap()
+                .iter()
+                .any(|e| matches!(e.kind, EventKind::ProcessSuspended) && e.pid == Some(child.id()));
+        }
+        let titles: Vec<String> = engine
+            .db
+            .recent_events(20, None)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.title)
+            .collect();
+        let _ = engine.process_action(child.id(), ProcessActionKind::Resume);
+        let _ = child.kill();
+        let _ = child.wait();
+        engine.shutdown();
+        assert!(
+            titles.iter().any(|t| t.contains("files are being encrypted")),
+            "{titles:?}"
+        );
+        assert!(suspended, "{titles:?}");
     }
 
     #[cfg(unix)]

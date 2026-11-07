@@ -28,6 +28,9 @@ function Wait-Until([scriptblock]$Condition, [string]$What, [int]$Seconds = 60) 
     }
     throw "FAIL (timeout): $What"
 }
+$writeLoad = (Resolve-Path "target/release/examples/write_load.exe").Path
+# Terminate quarantines a writer's executable, so every test runs its own copy.
+function New-Writer([string]$Name) { $dst = Join-Path $work $Name; Copy-Item $writeLoad $dst -Force; $dst }
 function New-UniqueCopy([string]$From, [string]$To) {
     Copy-Item $From $To -Force
     $tag = [Text.Encoding]::ASCII.GetBytes("sentinel-smoke-" + [guid]::NewGuid())
@@ -52,6 +55,9 @@ try {
         @{ sha256 = $procHash; name = "Smoke.Process"; severity = "critical" },
         @{ sha256 = $startupHash; name = "Smoke.Startup"; severity = "high" }) } |
         ConvertTo-Json -Depth 4 | Set-Content "$data\signatures\smoke.json" -Encoding ascii
+    # Network Guard test entry: TEST-NET-1 (RFC 5737), never routed on the internet.
+    New-Item -ItemType Directory -Force "$data\network" | Out-Null
+    Set-Content "$data\network\blocklist.txt" "192.0.2.0/24" -Encoding ascii
     $downloads = Join-Path $env:USERPROFILE "Downloads"
     New-Item -ItemType Directory -Force $downloads | Out-Null
 
@@ -87,7 +93,7 @@ try {
     # --- Ransomware decoys: unsigned heavy writer + decoy modified -> suspended -------
     $decoy = Join-Path $env:USERPROFILE "Documents\!_Accounts_2026.xlsx"
     Wait-Until { Test-Path -LiteralPath $decoy } "ransomware decoys planted in Documents"
-    $load = Start-Process (Resolve-Path "target/release/examples/write_load.exe").Path -ArgumentList "90" -PassThru -WindowStyle Hidden
+    $load = Start-Process (New-Writer "writer-decoy.exe") -ArgumentList "90" -PassThru -WindowStyle Hidden
     Start-Sleep 2
     $fs = [IO.File]::Open($decoy, "Open", "Write"); $fs.SetLength(0)
     $junk = [Text.Encoding]::ASCII.GetBytes("ENCRYPTED " * 100); $fs.Write($junk, 0, $junk.Length); $fs.Close()
@@ -97,6 +103,22 @@ try {
     Invoke-Elevated @{ type = "process_action"; data = @{ pid = $load.Id; action = "terminate" } }
     Wait-Until { $load.HasExited } "Terminate ended the suspended process" 15
     Wait-Until { Quarantine | Where-Object { $_.threat_name -eq "Behavior.Ransomware.Decoy" } } "its executable was quarantined"
+
+    # --- Encryption burst (entropy) suspends the heavy writer ------------------------
+    Start-Sleep 16   # decoy and entropy responses share a 15 s debounce
+    $load2 = Start-Process (New-Writer "writer-entropy.exe") -ArgumentList "90" -PassThru -WindowStyle Hidden
+    Start-Sleep 2
+    $burst = Join-Path $env:USERPROFILE "Documents\sentinel-entropy-test"
+    $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+    foreach ($n in 0..99) {
+        $dir = Join-Path $burst "folder$($n % 4)"; New-Item -ItemType Directory -Force $dir | Out-Null
+        $bytes = New-Object byte[] 8192; $rng.GetBytes($bytes)
+        [IO.File]::WriteAllBytes((Join-Path $dir "report$n.txt"), $bytes)
+    }
+    Wait-Until { Events | Where-Object { $_.title -eq "Ransomware behaviour: files are being encrypted" } } "encryption burst detected (entropy)" 20
+    Wait-Until { Events | Where-Object { $_.kind -eq "process_suspended" -and $_.pid -eq $load2.Id } } "heavy writer suspended after the encryption burst" 20
+    Invoke-Elevated @{ type = "process_action"; data = @{ pid = $load2.Id; action = "terminate" } }
+    Remove-Item $burst -Recurse -Force
 
     # --- Startup clean-up: Run key removed with the file, restored with it -----------
     $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
@@ -109,6 +131,48 @@ try {
     Invoke-Elevated @{ type = "restore_quarantine"; data = @{ id = $item.id } }
     Wait-Until { (Test-Path $startupExe) -and (Get-ItemProperty $runKey)."SentinelSmoke" } "restore put the file and its Run-key entry back"
     Remove-ItemProperty $runKey -Name "SentinelSmoke"
+
+    # --- Network Guard: WFP refuses the connection immediately ----------------------
+    Wait-Until { (Status).network_blocked_ranges -ge 1 } "Network Guard installed WFP filters"
+    $client = New-Object System.Net.Sockets.TcpClient
+    $code = 0
+    try { $client.ConnectAsync("192.0.2.1", 443).Wait(5000) | Out-Null } catch { $code = $_.Exception.InnerException.InnerException.ErrorCode; if (-not $code) { $code = $_.Exception.InnerException.ErrorCode } }
+    $client.Dispose()
+    if ($code -ne 10013) { throw "FAIL: connection to a blocked range was not refused by WFP (error $code; 10013 expected)" }
+    Write-Host "PASS: connection to blocked range refused instantly (WSAEACCES)" -ForegroundColor Green
+
+    # --- Execution Guard: unsigned program from Downloads is stopped, then allowed --
+    $tool = Join-Path $downloads "unsigned-tool.exe"
+    Copy-Item $writeLoad $tool
+    Start-Sleep 3   # let File Shield finish with the new file
+    $p1 = Start-Process $tool -ArgumentList "30" -PassThru -WindowStyle Hidden
+    Wait-Until { $p1.HasExited -and (Events | Where-Object { $_.title -eq "Blocked unsigned program from Downloads" }) } "Execution Guard stopped an unsigned program from Downloads" 15
+    Invoke-Elevated @{ type = "trust_app"; data = @{ path = $tool } }
+    Wait-Until { ((Invoke-Svc settings | Out-String | ConvertFrom-Json).data.trusted_apps | Where-Object { $_.path -eq $tool }) } "program added to trusted apps"
+    Start-Sleep 2
+    $p2 = Start-Process $tool -ArgumentList "30" -PassThru -WindowStyle Hidden
+    Start-Sleep 4
+    if ($p2.HasExited) { throw "FAIL: trusted program was still blocked" }
+    Write-Host "PASS: trusted program runs" -ForegroundColor Green
+    Stop-Process -Id $p2.Id -Force
+
+    # --- Attack-surface rule: a document app launching a shell is stopped ----------
+    $fakeWord = Join-Path $work "WINWORD.EXE"
+    Copy-Item "$env:SystemRoot\System32\cmd.exe" $fakeWord
+    Start-Process $fakeWord -ArgumentList "/c", "$env:SystemRoot\System32\cmd.exe /c ping -n 30 127.0.0.1 > nul" -WindowStyle Hidden
+    Wait-Until { Events | Where-Object { $_.title -like "Blocked cmd.exe started by WINWORD.EXE" } } "attack-surface rule stopped cmd.exe launched by WINWORD.EXE" 15
+
+    # --- Windows hardening report + LSA protection switch ----------------------------
+    $h = (Status).hardening
+    $h | Format-Table name, ok, fixable -AutoSize | Out-Host
+    if (-not ($h | Where-Object id -eq "lsa_protection")) { throw "FAIL: hardening checks missing" }
+    if (($h | Where-Object id -eq "lsa_protection").fixable) {
+        Invoke-Elevated @{ type = "enable_hardening"; data = @{ id = "lsa_protection" } }
+        if ((Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa").RunAsPPL -ne 1) { throw "FAIL: RunAsPPL not set" }
+    }
+    Write-Host "PASS: hardening checks reported, LSA protection can be enabled" -ForegroundColor Green
+    if ($null -eq (Status).cpu_percent) { [void](Status) }
+    if ($null -eq (Status).cpu_percent) { throw "FAIL: resource meter has no CPU reading" }
 
     # --- Process Guard --------------------------------------------------------------
     Start-Process $procExe -ArgumentList "-n", "60", "127.0.0.1" -WindowStyle Hidden

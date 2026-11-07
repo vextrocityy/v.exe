@@ -114,9 +114,13 @@ fn handle_start(engine: &Engine, images: &mut HashMap<u32, PathBuf>, ev: &Proces
     }
     let settings = engine.settings();
 
+    let parent = images.get(&ev.ppid).cloned().or_else(|| platform::image_path(ev.ppid));
+    let mut image_sha: Option<String> = None;
+
     // 1) Signature check of the executable.
     match engine.check_file(&image, None) {
         Ok(verdict) => {
+            image_sha = Some(verdict.sha256.clone());
             if let Some(hit) = &verdict.hit {
                 if settings.auto_kill_malicious
                     && engine.may_remediate(&image, hit).is_ok()
@@ -140,10 +144,55 @@ fn handle_start(engine: &Engine, images: &mut HashMap<u32, PathBuf>, ev: &Proces
         Err(reason) => tracing::debug!(image = %image.display(), ?reason, "could not hash process image"),
     }
 
-    // 2) Behavioural assessment (alert only).
+    // 2) Attack-surface rule: documents must not launch shells or script hosts.
+    if settings.block_office_children {
+        if let Some(parent) = parent
+            .as_deref()
+            .filter(|p| heuristics::office_spawning_shell(&image, p))
+        {
+            if platform::terminate(ev.pid) {
+                let name = |p: &std::path::Path| p.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                engine.emit(
+                    EventKind::ProcessBlocked,
+                    Severity::High,
+                    format!("Blocked {} started by {}", name(&image), name(parent)),
+                    Some(
+                        "Office documents and PDF readers launching a shell or script host is a classic malware \
+                         technique (malicious macros, exploits). Attack-surface rule."
+                            .into(),
+                    ),
+                    Some(&image),
+                    Some(ev.pid),
+                );
+                return;
+            }
+        }
+    }
+
+    // 3) Execution Guard: unsigned programs from Downloads / Temp / AppData.
+    if settings.block_untrusted_risky {
+        if let Some(folder) = heuristics::risky_location(&image) {
+            let trusted = image_sha.as_deref().is_some_and(|h| engine.is_trusted_app(h));
+            if !trusted && engine.may_suspend(ev.pid, &image) && platform::terminate(ev.pid) {
+                engine.emit(
+                    EventKind::ProcessBlocked,
+                    Severity::High,
+                    format!("Blocked unsigned program from {folder}"),
+                    Some(format!(
+                        "Execution Guard stops programs without a valid digital signature when they start from {folder}, \
+                         where malware usually lands. If you trust it, choose Always allow."
+                    )),
+                    Some(&image),
+                    Some(ev.pid),
+                );
+                return;
+            }
+        }
+    }
+
+    // 4) Behavioural assessment (alert only).
     if settings.behavior_monitor {
         let cmd = platform::command_line(ev.pid);
-        let parent = images.get(&ev.ppid).cloned().or_else(|| platform::image_path(ev.ppid));
         let a = heuristics::assess_process(&ProcessContext {
             image: &image,
             command_line: cmd.as_deref(),
