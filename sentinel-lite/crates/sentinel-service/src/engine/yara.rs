@@ -190,30 +190,39 @@ pub fn validate(src: &[u8]) -> Result<usize> {
 /// documents, identified by magic bytes or extension. Media, archives of
 /// unknown type and plain data are skipped to keep scans cheap.
 pub fn is_candidate(path: &Path) -> bool {
-    const SCRIPT_EXT: &[&str] = &[
-        "ps1", "psm1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "hta", "bat", "cmd", "lnk", "scr", "py", "sh", "doc",
-        "docm", "xls", "xlsm", "ppt", "pptm", "rtf", "pdf", "one", "iso", "img", "msi", "jar", "dll", "exe", "sys",
-    ];
-    let ext = path
-        .extension()
-        .and_then(|x| x.to_str())
-        .map(|x| x.to_ascii_lowercase());
-    if ext.as_deref().is_some_and(|e| SCRIPT_EXT.contains(&e)) {
+    if path.extension().and_then(|x| x.to_str()).is_some_and(is_candidate_ext) {
         return true;
     }
     let mut magic = [0u8; 4];
     let Ok(mut f) = std::fs::File::open(path) else {
         return false;
     };
-    if std::io::Read::read(&mut f, &mut magic).unwrap_or(0) < 4 {
-        return false;
-    }
-    magic[..2] == *b"MZ"                                   // PE
-        || magic == *b"\x7fELF"                            // ELF
+    std::io::Read::read(&mut f, &mut magic).unwrap_or(0) >= 4 && is_candidate_magic(&magic)
+}
+
+/// Same test for an in-memory archive member.
+pub fn is_candidate_member(name: &str, data: &[u8]) -> bool {
+    name.rsplit('.')
+        .next()
+        .is_some_and(|ext| ext != name && is_candidate_ext(ext))
+        || data.get(..4).is_some_and(|m| is_candidate_magic(m.try_into().unwrap()))
+}
+
+fn is_candidate_ext(ext: &str) -> bool {
+    const SCRIPT_EXT: &[&str] = &[
+        "ps1", "psm1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "hta", "bat", "cmd", "lnk", "scr", "py", "sh", "doc",
+        "docm", "xls", "xlsm", "ppt", "pptm", "rtf", "pdf", "one", "msi", "jar", "dll", "exe", "sys",
+    ];
+    SCRIPT_EXT.contains(&ext.to_ascii_lowercase().as_str())
+}
+
+fn is_candidate_magic(magic: &[u8; 4]) -> bool {
+    magic[..2] == *b"MZ"                                     // PE
+        || *magic == *b"\x7fELF"                            // ELF
         || matches!(magic, [0xCF | 0xCE, 0xFA, 0xED, 0xFE]) // Mach-O
-        || magic == [0xD0, 0xCF, 0x11, 0xE0]               // OLE (legacy Office, MSI)
-        || magic == *b"%PDF"
-        || magic == *b"{\\rt"
+        || *magic == [0xD0, 0xCF, 0x11, 0xE0]               // OLE (legacy Office, MSI, vbaProject.bin)
+        || *magic == *b"%PDF"
+        || *magic == *b"{\\rt"
 }
 
 pub fn scan_file(set: &RuleSet, path: &Path) -> Result<Vec<YaraMatch>> {
@@ -222,7 +231,19 @@ pub fn scan_file(set: &RuleSet, path: &Path) -> Result<Vec<YaraMatch>> {
     let results = scanner
         .scan_file(path)
         .with_context(|| format!("YARA scan of {}", path.display()))?;
-    Ok(results
+    Ok(collect(results))
+}
+
+/// Scan an in-memory buffer (archive members).
+pub fn scan_bytes(set: &RuleSet, data: &[u8]) -> Result<Vec<YaraMatch>> {
+    let mut scanner = yara_x::Scanner::new(&set.rules);
+    scanner.set_timeout(SCAN_TIMEOUT);
+    let results = scanner.scan(data).context("YARA scan of archive member")?;
+    Ok(collect(results))
+}
+
+fn collect(results: yara_x::ScanResults<'_, '_>) -> Vec<YaraMatch> {
+    results
         .matching_rules()
         .map(|r| {
             let mut score = None;
@@ -241,7 +262,7 @@ pub fn scan_file(set: &RuleSet, path: &Path) -> Result<Vec<YaraMatch>> {
                 description,
             }
         })
-        .collect())
+        .collect()
 }
 
 /// The strongest match decides the verdict.

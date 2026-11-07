@@ -31,6 +31,10 @@ const settings: Settings = {
   yara_rules_feed: true,
   yara_min_remediate_score: 75,
   yara_max_file_mb: 32,
+  archive_scanning: true,
+  ransomware_decoys: true,
+  ransomware_suspend: true,
+  startup_cleanup: true,
 };
 let lastUpdate = now() - 3 * 3600;
 let updating = false;
@@ -47,6 +51,8 @@ let quarantine: QuarantineItem[] = [
 ];
 
 const events: SecurityEvent[] = [
+  { id: 5, timestamp: now() - 600, kind: "process_suspended", severity: "critical", title: "Suspended encryptor.exe", detail: "It wrote 48.2 MB in 1 second right after the decoy changed. It is frozen, not killed: choose Terminate (and quarantine it) or Resume in Activity.", path: "C:\\Users\\alex\\AppData\\Local\\Temp\\encryptor.exe", pid: 7344 },
+  { id: 4, timestamp: now() - 601, kind: "behavior_alert", severity: "critical", title: "Ransomware behaviour: a decoy file was changed", detail: "A hidden decoy file was modified. Legitimate programs never touch it.", path: "C:\\Users\\alex\\Documents\\!_Accounts_2026.xlsx", pid: null },
   { id: 3, timestamp: now() - 5400, kind: "threat_quarantined", severity: "info", title: "EICAR-Test-File moved to quarantine", detail: null, path: quarantine[0].original_path, pid: null },
   { id: 2, timestamp: now() - 5401, kind: "threat_detected", severity: "high", title: "EICAR-Test-File detected", detail: "Found by File Shield", path: quarantine[0].original_path, pid: null },
   { id: 1, timestamp: now() - 7200, kind: "service_info", severity: "info", title: "Sentinel-Lite engine started", detail: "2 signatures loaded", path: null, pid: null },
@@ -120,6 +126,9 @@ export const mock = {
         case "start_scan": return startScan(args.kind as ScanKind);
         case "cancel_scan": return scan.running ? finishScan(true) : undefined;
         case "acknowledge_threats": return undefined;
+        case "process_action":
+          push({ kind: args.action === "terminate" ? "process_blocked" : "service_info", severity: "high", title: args.action === "terminate" ? "Process terminated by user" : "Process resumed by user", detail: null, path: null, pid: args.pid as number });
+          return undefined;
         case "update_signatures":
           updating = true;
           setTimeout(() => {

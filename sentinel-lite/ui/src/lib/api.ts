@@ -2,7 +2,7 @@
 // Outside Tauri (plain `npm run dev` in a browser) it falls back to an
 // in-memory mock engine so the UI can be developed without the service.
 
-import type { EngineStatus, QuarantineItem, ScanKind, SecurityEvent, Settings } from "./types";
+import type { EngineStatus, ProcessAction, QuarantineItem, ScanKind, SecurityEvent, Settings } from "./types";
 import { mock } from "./mock";
 
 export const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -19,6 +19,7 @@ export const api = {
   cancelScan: () => invoke<void>("cancel_scan"),
   acknowledgeThreats: () => invoke<void>("acknowledge_threats"),
   updateSignatures: () => invoke<void>("update_signatures"),
+  processAction: (pid: number, action: ProcessAction) => invoke<void>("process_action", { pid, action }),
   getEvents: (limit = 100, beforeId?: number) => invoke<SecurityEvent[]>("get_events", { limit, beforeId }),
   listQuarantine: () => invoke<QuarantineItem[]>("list_quarantine"),
   restoreQuarantine: (id: string) => invoke<void>("restore_quarantine", { id }),

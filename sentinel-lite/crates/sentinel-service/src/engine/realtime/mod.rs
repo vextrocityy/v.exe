@@ -2,6 +2,7 @@
 //! and reports whether it started. A shield that fails to start degrades the
 //! dashboard to "At risk" rather than crashing the service.
 
+pub mod decoy;
 pub mod file_watch;
 pub mod persistence;
 pub mod process;

@@ -7,7 +7,7 @@ pub mod transport;
 use crate::engine::Engine;
 use anyhow::Result;
 use auth::AuthToken;
-use sentinel_protocol::{ErrorCode, Request, Response, MAX_FRAME_BYTES, PROTOCOL_VERSION};
+use sentinel_protocol::{ErrorCode, ProcessActionKind, Request, Response, MAX_FRAME_BYTES, PROTOCOL_VERSION};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -151,6 +151,12 @@ async fn dispatch(engine: &Arc<Engine>, req: Request, peer: &Peer) -> Response {
         Request::RestoreQuarantine { .. } if !peer.elevated => {
             return elevation_required("releases a detected threat");
         }
+        Request::ProcessAction {
+            action: ProcessActionKind::Resume,
+            ..
+        } if !peer.elevated => {
+            return elevation_required("resumes a process suspended as ransomware");
+        }
         Request::UpdateSettings { settings } if !peer.elevated => {
             let current = engine.settings();
             let proposed = crate::settings::merge_secrets(&current, crate::settings::sanitize(settings.clone()));
@@ -181,6 +187,13 @@ async fn dispatch(engine: &Arc<Engine>, req: Request, peer: &Peer) -> Response {
         Request::AcknowledgeThreats => {
             e.acknowledge_threats();
             Ok(Response::Ok)
+        }
+        Request::ProcessAction { pid, action } => {
+            blocking(move || match e.process_action(pid, action) {
+                Ok(_) => Response::Ok,
+                Err(m) => Response::error(ErrorCode::NotFound, m),
+            })
+            .await
         }
         Request::UpdateSignatures => Ok(match e.start_update() {
             Ok(()) => Response::Ok,

@@ -114,6 +114,14 @@ const MIGRATIONS: &[&str] = &[
         rule    TEXT,
         score   INTEGER
      ) WITHOUT ROWID;",
+    // 4: startup entries removed together with a quarantined file (put back on restore)
+    "CREATE TABLE IF NOT EXISTS removed_persistence (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        quarantine_id TEXT NOT NULL,
+        entry         TEXT NOT NULL,
+        description   TEXT NOT NULL
+     );
+     CREATE INDEX IF NOT EXISTS removed_persistence_q ON removed_persistence(quarantine_id);",
 ];
 
 /// A cached YARA verdict: `None` = scanned clean.
@@ -504,6 +512,30 @@ impl Database {
         let _ = self
             .conn()
             .execute("DELETE FROM yara_cache WHERE ruleset != ?1", [current_ruleset]);
+    }
+
+    pub fn add_removed_persistence(&self, quarantine_id: &str, entry_json: &str, description: &str) {
+        let _ = self.conn().execute(
+            "INSERT INTO removed_persistence (quarantine_id, entry, description) VALUES (?1, ?2, ?3)",
+            params![quarantine_id, entry_json, description],
+        );
+    }
+
+    /// Return and forget the startup entries removed with `quarantine_id`.
+    pub fn take_removed_persistence(&self, quarantine_id: &str) -> Vec<(String, String)> {
+        let c = self.conn();
+        let rows: Vec<(String, String)> = c
+            .prepare_cached("SELECT entry, description FROM removed_persistence WHERE quarantine_id = ?1 ORDER BY id")
+            .and_then(|mut s| {
+                let it = s.query_map([quarantine_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                Ok(it.filter_map(|r| r.ok()).collect())
+            })
+            .unwrap_or_default();
+        let _ = c.execute(
+            "DELETE FROM removed_persistence WHERE quarantine_id = ?1",
+            [quarantine_id],
+        );
+        rows
     }
 
     pub fn set_counter(&self, name: &str, value: i64) {

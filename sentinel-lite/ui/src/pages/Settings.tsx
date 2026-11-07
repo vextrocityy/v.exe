@@ -121,6 +121,21 @@ export function SettingsPage() {
         </Row>
       </Panel>
 
+      <Panel title="Ransomware, archives & clean-up">
+        <Row label="Scan inside archives" hint="Look inside ZIP files (including Office documents) and ISO/IMG disk images. A malicious file inside quarantines the whole archive.">
+          <Toggle label="Scan inside archives" checked={s.archive_scanning} onChange={(v) => set("archive_scanning", v)} />
+        </Row>
+        <Row label="Ransomware decoys" hint="Hidden decoy files in Documents, Pictures and Desktop. Nothing legitimate touches them, so a change means ransomware.">
+          <Toggle label="Ransomware decoys" checked={s.ransomware_decoys} disabled={!s.realtime_protection || !s.file_monitor} onChange={(v) => set("ransomware_decoys", v)} />
+        </Row>
+        <Row label="Suspend the culprit" hint="When a decoy changes, freeze the program writing the most (never Windows or signed programs). You choose Terminate or Resume.">
+          <Toggle label="Suspend the culprit" checked={s.ransomware_suspend} disabled={!s.ransomware_decoys} onChange={(v) => set("ransomware_suspend", v)} />
+        </Row>
+        <Row label="Startup clean-up" hint="When a file is quarantined, also remove the Run keys, Startup shortcuts and services that launch it. Restoring the file puts them back.">
+          <Toggle label="Startup clean-up" checked={s.startup_cleanup} onChange={(v) => set("startup_cleanup", v)} />
+        </Row>
+      </Panel>
+
       <Panel title="YARA rules">
         <Row label="YARA scanning" hint="Scan executables, scripts, shortcuts and documents with rules that recognise malware families and their new variants.">
           <Toggle label="YARA scanning" checked={s.yara_enabled} onChange={(v) => set("yara_enabled", v)} />

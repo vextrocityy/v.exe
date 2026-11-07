@@ -14,6 +14,12 @@ $work = "C:\sentinel-smoke"
 function Invoke-Svc { $out = & $svc @args; if ($LASTEXITCODE) { throw "sentinel-service $args failed: $out" }; $out }
 function Status { (Invoke-Svc status | Out-String | ConvertFrom-Json).data }
 function Events { (Invoke-Svc events 100 | Out-String | ConvertFrom-Json).data }
+function Quarantine { (Invoke-Svc quarantine | Out-String | ConvertFrom-Json).data }
+function Invoke-Elevated($Request) {
+    $json = $Request | ConvertTo-Json -Depth 8 -Compress
+    $hex = -join ([Text.Encoding]::UTF8.GetBytes($json) | ForEach-Object { $_.ToString("x2") })
+    Invoke-Svc elevated-request $hex | Out-Host
+}
 function Wait-Until([scriptblock]$Condition, [string]$What, [int]$Seconds = 60) {
     $deadline = (Get-Date).AddSeconds($Seconds)
     while ((Get-Date) -lt $deadline) {
@@ -37,11 +43,14 @@ try {
     $fileHash = (Get-FileHash $payload -Algorithm SHA256).Hash.ToLower()
     $procExe = Join-Path $work "smokeproc.exe"
     $procHash = New-UniqueCopy "$env:SystemRoot\System32\PING.EXE" $procExe
+    $startupExe = Join-Path $work "startup-agent.exe"
+    $startupHash = New-UniqueCopy "$env:SystemRoot\System32\PING.EXE" $startupExe
 
     New-Item -ItemType Directory -Force "$data\signatures" | Out-Null
     @{ name = "smoke-test"; version = "1"; signatures = @(
         @{ sha256 = $fileHash; name = "Smoke.File"; severity = "high" },
-        @{ sha256 = $procHash; name = "Smoke.Process"; severity = "critical" }) } |
+        @{ sha256 = $procHash; name = "Smoke.Process"; severity = "critical" },
+        @{ sha256 = $startupHash; name = "Smoke.Startup"; severity = "high" }) } |
         ConvertTo-Json -Depth 4 | Set-Content "$data\signatures\smoke.json" -Encoding ascii
     $downloads = Join-Path $env:USERPROFILE "Downloads"
     New-Item -ItemType Directory -Force $downloads | Out-Null
@@ -66,6 +75,40 @@ try {
     $script = Join-Path $downloads "smoke-yara.ps1"
     Set-Content $script "Write-Host 'hello'`n# SENTINEL-LITE-YARA-TEST-MARKER-7f3c9a" -Encoding ascii
     Wait-Until { -not (Test-Path $script) -and (Events | Where-Object { $_.title -like "YARA.Sentinel_SelfTest_Marker*" }) } "YARA rule match quarantined by File Shield"
+
+    # --- Archive scanning: payload inside a ZIP dropped in Downloads -----------------
+    $zipSrc = Join-Path $work "zipsrc"; New-Item -ItemType Directory -Force $zipSrc | Out-Null
+    Copy-Item $payload (Join-Path $zipSrc "invoice.pdf.exe")
+    Compress-Archive -Path "$zipSrc\*" -DestinationPath (Join-Path $work "delivery.zip") -Force
+    $zipDrop = Join-Path $downloads "delivery.zip"
+    Copy-Item (Join-Path $work "delivery.zip") $zipDrop
+    Wait-Until { -not (Test-Path $zipDrop) -and (Events | Where-Object { $_.title -like "*inside delivery.zip/invoice.pdf.exe*" }) } "archive scanning quarantined a ZIP with a malicious member"
+
+    # --- Ransomware decoys: unsigned heavy writer + decoy modified -> suspended -------
+    $decoy = Join-Path $env:USERPROFILE "Documents\!_Accounts_2026.xlsx"
+    Wait-Until { Test-Path -LiteralPath $decoy } "ransomware decoys planted in Documents"
+    $load = Start-Process (Resolve-Path "target/release/examples/write_load.exe").Path -ArgumentList "90" -PassThru -WindowStyle Hidden
+    Start-Sleep 2
+    $fs = [IO.File]::Open($decoy, "Open", "Write"); $fs.SetLength(0)
+    $junk = [Text.Encoding]::ASCII.GetBytes("ENCRYPTED " * 100); $fs.Write($junk, 0, $junk.Length); $fs.Close()
+    Wait-Until { Events | Where-Object { $_.kind -eq "process_suspended" -and $_.pid -eq $load.Id } } "decoy change suspended the heavy writer (pid $($load.Id))" 30
+    $thread = (Get-Process -Id $load.Id).Threads | Select-Object -First 1
+    if ($thread.WaitReason -ne "Suspended") { throw "FAIL: writer not actually suspended (wait reason: $($thread.WaitReason))" }
+    Invoke-Elevated @{ type = "process_action"; data = @{ pid = $load.Id; action = "terminate" } }
+    Wait-Until { $load.HasExited } "Terminate ended the suspended process" 15
+    Wait-Until { Quarantine | Where-Object { $_.threat_name -eq "Behavior.Ransomware.Decoy" } } "its executable was quarantined"
+
+    # --- Startup clean-up: Run key removed with the file, restored with it -----------
+    $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+    Set-ItemProperty $runKey -Name "SentinelSmoke" -Value "`"$startupExe`" -n 1 127.0.0.1"
+    Invoke-Svc scan $startupExe | Out-Null
+    if (Test-Path $startupExe) { throw "FAIL: startup agent not quarantined" }
+    if ((Get-ItemProperty $runKey)."SentinelSmoke") { throw "FAIL: Run value still present" }
+    Write-Host "PASS: Run-key entry removed together with the quarantined file" -ForegroundColor Green
+    $item = Quarantine | Where-Object { $_.original_path -eq $startupExe } | Select-Object -First 1
+    Invoke-Elevated @{ type = "restore_quarantine"; data = @{ id = $item.id } }
+    Wait-Until { (Test-Path $startupExe) -and (Get-ItemProperty $runKey)."SentinelSmoke" } "restore put the file and its Run-key entry back"
+    Remove-ItemProperty $runKey -Name "SentinelSmoke"
 
     # --- Process Guard --------------------------------------------------------------
     Start-Process $procExe -ArgumentList "-n", "60", "127.0.0.1" -WindowStyle Hidden

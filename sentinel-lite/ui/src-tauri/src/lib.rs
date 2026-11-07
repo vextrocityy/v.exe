@@ -81,6 +81,14 @@ async fn update_signatures() -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn process_action(pid: u32, action: ProcessActionKind) -> Result<(), String> {
+    // Resume weakens protection: the service asks for elevation, handled via UAC.
+    call_privileged(Request::ProcessAction { pid, action })
+        .await
+        .map(|_| ())
+}
+
+#[tauri::command]
 async fn get_events(limit: Option<u32>, before_id: Option<i64>) -> Result<Vec<SecurityEvent>, String> {
     match call(Request::GetEvents {
         limit: limit.unwrap_or(100),
@@ -143,7 +151,7 @@ fn show_main(app: &AppHandle) {
 /// Desktop notification for events the user must know about even with the window closed.
 fn maybe_notify(app: &AppHandle, ev: &SecurityEvent) {
     let important = match ev.kind {
-        EventKind::ThreatDetected | EventKind::ProcessBlocked => true,
+        EventKind::ThreatDetected | EventKind::ProcessBlocked | EventKind::ProcessSuspended => true,
         EventKind::BehaviorAlert => ev.severity >= Severity::High,
         _ => false,
     };
@@ -265,6 +273,7 @@ pub fn run() {
             cancel_scan,
             acknowledge_threats,
             update_signatures,
+            process_action,
             get_events,
             list_quarantine,
             restore_quarantine,

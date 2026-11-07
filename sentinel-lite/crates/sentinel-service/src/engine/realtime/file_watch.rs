@@ -59,6 +59,14 @@ pub fn start(engine: Arc<Engine>) -> Result<ShieldHandle, String> {
             while !stop2.load(Ordering::Relaxed) {
                 match rx.recv_timeout(Duration::from_millis(250)) {
                     Ok(ev) => {
+                        // Decoys first: any write, rename or delete touching one.
+                        if !matches!(ev.kind, NEvent::Access(_)) {
+                            for p in &ev.paths {
+                                if engine.is_decoy(p) {
+                                    engine.on_decoy_event(p.clone());
+                                }
+                            }
+                        }
                         let behavior = engine.settings().behavior_monitor;
                         for (path, activity) in classify(&ev, &mut rename_from) {
                             if engine.is_excluded(&path) {

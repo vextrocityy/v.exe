@@ -50,6 +50,7 @@ export type EventKind =
   | "threat_detected"
   | "threat_quarantined"
   | "process_blocked"
+  | "process_suspended"
   | "persistence_change"
   | "behavior_alert"
   | "scan_started"
@@ -105,7 +106,13 @@ export interface Settings {
   yara_rules_feed: boolean;
   yara_min_remediate_score: number;
   yara_max_file_mb: number;
+  archive_scanning: boolean;
+  ransomware_decoys: boolean;
+  ransomware_suspend: boolean;
+  startup_cleanup: boolean;
 }
+
+export type ProcessAction = "resume" | "terminate";
 
 export type StateTone = "safe" | "warn" | "danger";
 

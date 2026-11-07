@@ -9,6 +9,7 @@
 //!   sentinel-service status       print the running service's status (JSON)
 //!   sentinel-service events [n]   print the last n security events (JSON)
 //!   sentinel-service settings     print the active settings (JSON)
+//!   sentinel-service quarantine   list quarantined items (JSON)
 //!   sentinel-service keygen       create an Ed25519 update-signing keypair
 //!   sentinel-service sign-pack <pack.json> <secret-key-file>   writes <pack.json>.sig
 //!   sentinel-service yara-check <rules-dir> [path]   compile rules, optionally scan (support/QA)
@@ -79,6 +80,11 @@ fn main() -> Result<()> {
         Some("events") => {
             let limit = args.get(1).and_then(|n| n.parse().ok()).unwrap_or(50);
             let resp = ipc::client::request(&sentinel_protocol::Request::GetEvents { limit, before_id: None })?;
+            println!("{}", serde_json::to_string_pretty(&resp)?);
+            Ok(())
+        }
+        Some("quarantine") => {
+            let resp = ipc::client::request(&sentinel_protocol::Request::ListQuarantine)?;
             println!("{}", serde_json::to_string_pretty(&resp)?);
             Ok(())
         }
@@ -211,7 +217,10 @@ fn elevated_request(hex: &str) -> Result<()> {
         .filter(|b| b.len() <= 64 * 1024)
         .ok_or_else(|| anyhow::anyhow!("bad request encoding"))?;
     let req: Request = serde_json::from_slice(&raw)?;
-    if !matches!(req, Request::UpdateSettings { .. } | Request::RestoreQuarantine { .. }) {
+    if !matches!(
+        req,
+        Request::UpdateSettings { .. } | Request::RestoreQuarantine { .. } | Request::ProcessAction { .. }
+    ) {
         bail!("request type not allowed");
     }
     match ipc::client::request(&req)? {

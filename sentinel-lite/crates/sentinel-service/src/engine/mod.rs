@@ -1,6 +1,7 @@
 //! The protection engine: owns the database, quarantine vault, settings,
 //! real-time shields and on-demand scans, and publishes security events.
 
+pub mod archive;
 pub mod hasher;
 pub mod heuristics;
 pub mod quarantine;
@@ -77,6 +78,10 @@ pub struct Engine {
     scheduler: Mutex<Option<(Arc<AtomicBool>, std::thread::JoinHandle<()>)>>,
     pub yara: yara::YaraEngine,
     yara_reload: Mutex<()>,
+    decoys: Mutex<realtime::decoy::Decoys>,
+    /// Processes we suspended, awaiting the user's decision.
+    suspended: Mutex<std::collections::HashMap<u32, PathBuf>>,
+    last_decoy_response: Mutex<Option<Instant>>,
     started: Instant,
 }
 
@@ -87,6 +92,7 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 impl Engine {
     pub fn new(paths: AppPaths, db: Database, settings: Settings) -> Result<Arc<Self>> {
         let quarantine = Quarantine::new(paths.quarantine.clone())?;
+        let decoys = realtime::decoy::Decoys::load(&db);
         let (events, _) = broadcast::channel(256);
         Ok(Arc::new(Self {
             db,
@@ -103,6 +109,9 @@ impl Engine {
             scheduler: Mutex::new(None),
             yara: yara::YaraEngine::default(),
             yara_reload: Mutex::new(()),
+            decoys: Mutex::new(decoys),
+            suspended: Mutex::new(std::collections::HashMap::new()),
+            last_decoy_response: Mutex::new(None),
             started: Instant::now(),
         }))
     }
@@ -233,7 +242,61 @@ impl Engine {
         if hit.is_none() {
             hit = self.yara_check(path, &sha256, size);
         }
+        if hit.is_none() {
+            hit = self.archive_check(path, &sha256, size);
+        }
         Ok(FileVerdict { sha256, size, hit })
+    }
+
+    /// Look inside ZIP / ISO files. Clean results are cached per archive hash,
+    /// rule-set version and signature count, so archives are not reopened on
+    /// every scan; a match inside quarantines the whole archive.
+    fn archive_check(&self, path: &Path, sha256: &str, size: u64) -> Option<SignatureHit> {
+        let s = self.settings();
+        let limits = archive::Limits::default();
+        if !s.archive_scanning || size == 0 || size > limits.max_total {
+            return None;
+        }
+        archive::kind_of_file(path)?;
+        let rules = if s.yara_enabled { self.yara.rules() } else { None };
+        let cache_key = format!(
+            "arc:{}:{}",
+            rules.as_ref().map(|r| r.version.as_str()).unwrap_or("none"),
+            self.db.signature_count()
+        );
+        if let Some(None) = self.db.yara_cached(sha256, &cache_key) {
+            return None; // known clean with today's signatures and rules
+        }
+        let yara_max = s.yara_max_file_mb.saturating_mul(1024 * 1024);
+        let mut check = |name: &str, data: &[u8]| -> Option<SignatureHit> {
+            let member_sha = hasher::sha256_bytes(data);
+            if let Ok(Some(hit)) = self.db.lookup_hash(&member_sha) {
+                return Some(hit);
+            }
+            let rules = rules.as_ref()?;
+            if data.len() as u64 > yara_max || !yara::is_candidate_member(name, data) {
+                return None;
+            }
+            let m = yara::scan_bytes(rules, data).ok()?;
+            let top = yara::strongest(&m)?;
+            Some(yara_hit(&top.namespace, &top.rule, top.score, top.description.clone()))
+        };
+        match archive::scan(path, limits, &mut check) {
+            Ok((Some(found), _)) => {
+                let mut hit = found.detail;
+                hit.name = format!("{} (inside {})", hit.name, found.member);
+                Some(hit)
+            }
+            Ok((None, stats)) => {
+                tracing::debug!(path = %path.display(), members = stats.members_checked, skipped = stats.members_skipped, "archive clean");
+                self.db.store_yara(sha256, &cache_key, &None);
+                None
+            }
+            Err(e) => {
+                tracing::debug!(path = %path.display(), error = %format!("{e:#}"), "archive not inspected");
+                None
+            }
+        }
     }
 
     /// YARA pass for files no hash matched. Verdicts are cached per content
@@ -265,17 +328,7 @@ impl Engine {
         }?;
         let (id, score, description) = verdict;
         let (namespace, rule) = id.split_once(':').unwrap_or(("rules", id.as_str()));
-        Some(SignatureHit {
-            name: format!("YARA.{rule}"),
-            severity: match score {
-                90.. => Severity::Critical,
-                75..=89 => Severity::High,
-                _ => Severity::Medium,
-            },
-            source: format!("{}{namespace}", crate::database::YARA_PREFIX),
-            score: Some(score),
-            description,
-        })
+        Some(yara_hit(namespace, rule, score, description))
     }
 
     /// Safety gate before killing or quarantining. Hashes from vetted sources
@@ -307,7 +360,12 @@ impl Engine {
 
     fn match_description(hit: &SignatureHit, sha256: &str) -> String {
         if hit.is_yara() {
-            let rule = hit.name.trim_start_matches("YARA.");
+            let rule = hit
+                .name
+                .trim_start_matches("YARA.")
+                .split(" (inside ")
+                .next()
+                .unwrap_or_default();
             let ns = hit.source.trim_start_matches(crate::database::YARA_PREFIX);
             let desc = hit
                 .description
@@ -370,6 +428,11 @@ impl Engine {
                     Some(path),
                     pid,
                 );
+                if self.settings().startup_cleanup {
+                    crate::util::contain("startup clean-up", || {
+                        self.cleanup_startup(path, &item.id, &realtime::persistence::startup_folders())
+                    });
+                }
             }
             Err(e) => {
                 self.unresolved_threats.fetch_add(1, Ordering::Relaxed);
@@ -387,8 +450,65 @@ impl Engine {
 
     // ----- quarantine ----------------------------------------------------------
 
+    /// Remove every autostart that launches `path` (now quarantined). Each
+    /// removal is recorded against the quarantine item so a restore puts it back.
+    pub fn cleanup_startup(&self, path: &Path, quarantine_id: &str, startup_folders: &[PathBuf]) -> usize {
+        use realtime::persistence::{self as pers, Removed};
+        let mut removed: Vec<(Removed, String)> = pers::remove_registry_references(path);
+        for item in pers::startup_items_referencing(path, startup_folders) {
+            let sha = hasher::sha256_file(&item, 16 * 1024 * 1024)
+                .map(|(h, _)| h)
+                .unwrap_or_default();
+            let label = format!(
+                "Startup item for {}",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            );
+            if let Ok(q) = self.quarantine.isolate(&self.db, &item, &sha, &label) {
+                removed.push((Removed::StartupItem { quarantine_id: q.id }, item.display().to_string()));
+            }
+        }
+        for (entry, desc) in &removed {
+            if let Ok(json) = serde_json::to_string(entry) {
+                self.db.add_removed_persistence(quarantine_id, &json, desc);
+            }
+            self.emit(
+                EventKind::PersistenceChange,
+                Severity::Info,
+                "Removed startup entry for a quarantined file",
+                Some(format!("{desc}. It will be put back if you restore the file.")),
+                Some(path),
+                None,
+            );
+        }
+        removed.len()
+    }
+
     pub fn restore_quarantine(&self, id: &str) -> Result<PathBuf> {
         let restored = self.quarantine.restore(&self.db, id)?;
+        for (json, desc) in self.db.take_removed_persistence(id) {
+            let Ok(entry) = serde_json::from_str::<realtime::persistence::Removed>(&json) else {
+                continue;
+            };
+            let result = match &entry {
+                realtime::persistence::Removed::StartupItem { quarantine_id } => {
+                    self.quarantine.restore(&self.db, quarantine_id).map(|_| ())
+                }
+                other => realtime::persistence::restore_registry(other),
+            };
+            match result {
+                Ok(()) => {
+                    self.emit(
+                        EventKind::PersistenceChange,
+                        Severity::Info,
+                        "Startup entry restored",
+                        Some(desc),
+                        Some(&restored),
+                        None,
+                    );
+                }
+                Err(e) => tracing::warn!(entry = %desc, error = %format!("{e:#}"), "could not restore startup entry"),
+            }
+        }
         self.emit(
             EventKind::SettingsChanged,
             Severity::Medium,
@@ -564,6 +684,193 @@ impl Engine {
     pub fn start_realtime(self: &Arc<Self>) {
         let statuses = lock(&self.realtime).start(self);
         *self.shields.write().unwrap_or_else(|e| e.into_inner()) = statuses;
+        crate::util::contain("decoy sync", || self.sync_decoys());
+    }
+
+    // ----- ransomware decoys -------------------------------------------------------------
+
+    /// Plant (or remove) decoys to match settings; report decoys that were
+    /// tampered with while nobody was watching.
+    pub fn sync_decoys(&self) {
+        let s = self.settings();
+        let mut decoys = lock(&self.decoys);
+        if s.realtime_protection && s.file_monitor && s.ransomware_decoys {
+            for (path, state) in decoys.tampered() {
+                self.emit(
+                    EventKind::BehaviorAlert,
+                    Severity::High,
+                    "Ransomware decoy changed while protection was off",
+                    Some(format!("The decoy was {state:?}. Check recent files in this folder.").to_lowercase()),
+                    Some(&path),
+                    None,
+                );
+            }
+            let n = decoys.plant(&self.db, &decoy_profiles());
+            if n > 0 {
+                tracing::info!(planted = n, "ransomware decoys in place");
+            }
+        } else {
+            decoys.remove_all(&self.db);
+        }
+    }
+
+    #[cfg(all(test, unix))]
+    pub fn plant_decoys_for_test(&self, profiles: &[PathBuf]) -> usize {
+        lock(&self.decoys).plant(&self.db, profiles)
+    }
+
+    pub fn is_decoy(&self, path: &Path) -> bool {
+        lock(&self.decoys).is_decoy(path)
+    }
+
+    /// File Shield saw a change to a decoy. Respond on a separate thread
+    /// (sampling takes a second) so the watcher keeps draining events.
+    pub fn on_decoy_event(self: &Arc<Self>, path: PathBuf) {
+        let e = self.clone();
+        let _ = std::thread::Builder::new()
+            .name("decoy-response".into())
+            .spawn(move || crate::util::contain("decoy response", || e.respond_to_decoy(&path)));
+    }
+
+    /// Never suspend the OS, ourselves, excluded or validly code-signed programs.
+    fn may_suspend(&self, pid: u32, image: &Path) -> bool {
+        if pid <= 4 || pid == std::process::id() || self.is_excluded(image) {
+            return false;
+        }
+        if let Some(root) = std::env::var_os("SystemRoot") {
+            if crate::util::path_within(&image.to_string_lossy(), &root.to_string_lossy()) {
+                return false;
+            }
+        }
+        !crate::platform::has_valid_signature(image)
+    }
+
+    pub(crate) fn respond_to_decoy(&self, path: &Path) {
+        let state = lock(&self.decoys).state(path);
+        if !matches!(
+            state,
+            Some(realtime::decoy::State::Modified | realtime::decoy::State::Missing)
+        ) {
+            return; // metadata-only event or not ours: decoy content is unchanged
+        }
+        {
+            let mut last = lock(&self.last_decoy_response);
+            if last.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(15)) {
+                return; // one attack touches several decoys: respond once
+            }
+            *last = Some(Instant::now());
+        }
+        self.emit(
+            EventKind::BehaviorAlert,
+            Severity::Critical,
+            "Ransomware behaviour: a decoy file was changed",
+            Some(format!(
+                "A hidden decoy file was {}. Legitimate programs never touch it.",
+                if state == Some(realtime::decoy::State::Missing) {
+                    "deleted or renamed"
+                } else {
+                    "modified"
+                }
+            )),
+            Some(path),
+            None,
+        );
+        if self.settings().ransomware_suspend {
+            let suspects =
+                realtime::decoy::heaviest_writers(std::time::Duration::from_secs(1), 512 * 1024, |pid, img| {
+                    self.may_suspend(pid, img)
+                });
+            match suspects.first() {
+                Some(s) if crate::platform::suspend(s.pid) => {
+                    lock(&self.suspended).insert(s.pid, s.image.clone());
+                    self.emit(
+                        EventKind::ProcessSuspended,
+                        Severity::Critical,
+                        format!(
+                            "Suspended {}",
+                            s.image.file_name().unwrap_or_default().to_string_lossy()
+                        ),
+                        Some(format!(
+                            "It wrote {:.1} MB in 1 second right after the decoy changed. It is frozen, not killed: \
+                             choose Terminate (and quarantine it) or Resume in Activity.",
+                            s.bytes_written as f64 / 1e6
+                        )),
+                        Some(&s.image),
+                        Some(s.pid),
+                    );
+                }
+                Some(s) => tracing::warn!(pid = s.pid, "could not suspend ransomware suspect"),
+                None => {
+                    self.emit(
+                        EventKind::BehaviorAlert,
+                        Severity::High,
+                        "No process could be suspended",
+                        Some(
+                            "No unsigned, non-system program was writing heavily. Windows components and signed \
+                             programs are never suspended automatically."
+                                .into(),
+                        ),
+                        Some(path),
+                        None,
+                    );
+                }
+            }
+        }
+        lock(&self.decoys).replant(&self.db);
+    }
+
+    /// The user's decision on a suspended process.
+    pub fn process_action(&self, pid: u32, action: ProcessActionKind) -> Result<String, String> {
+        let image = lock(&self.suspended).remove(&pid);
+        match action {
+            ProcessActionKind::Resume => {
+                if !crate::platform::resume(pid) {
+                    return Err("could not resume the process (it may have exited)".into());
+                }
+                self.emit(
+                    EventKind::ServiceInfo,
+                    Severity::Medium,
+                    "Process resumed by user",
+                    None,
+                    image.as_deref(),
+                    Some(pid),
+                );
+                Ok("resumed".into())
+            }
+            ProcessActionKind::Terminate => {
+                let image = image.or_else(|| crate::platform::image_path(pid));
+                if !crate::platform::terminate(pid) {
+                    return Err("could not terminate the process (it may have exited)".into());
+                }
+                self.emit(
+                    EventKind::ProcessBlocked,
+                    Severity::High,
+                    "Process terminated by user",
+                    None,
+                    image.as_deref(),
+                    Some(pid),
+                );
+                // Quarantine its executable too (reversible), unless it is a system or signed binary.
+                if let Some(image) = image.filter(|img| self.may_suspend(pid, img)) {
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    if let Ok((sha256, size)) = hasher::sha256_file(&image, u64::MAX) {
+                        let verdict = FileVerdict {
+                            sha256,
+                            size,
+                            hit: Some(SignatureHit {
+                                name: "Behavior.Ransomware.Decoy".into(),
+                                severity: Severity::Critical,
+                                source: "behavior:decoy".into(),
+                                score: None,
+                                description: Some("modified a ransomware decoy file".into()),
+                            }),
+                        };
+                        self.handle_detection(&image, &verdict, Some(pid), "Ransomware decoys");
+                    }
+                }
+                Ok("terminated".into())
+            }
+        }
     }
 
     pub fn restart_realtime(self: &Arc<Self>) {
@@ -683,6 +990,29 @@ impl Engine {
     }
 }
 
+/// Profiles that get decoys. Unit tests plant their own and never touch real profiles.
+fn decoy_profiles() -> Vec<PathBuf> {
+    if cfg!(test) {
+        Vec::new()
+    } else {
+        targets::user_profiles()
+    }
+}
+
+fn yara_hit(namespace: &str, rule: &str, score: u32, description: Option<String>) -> SignatureHit {
+    SignatureHit {
+        name: format!("YARA.{rule}"),
+        severity: match score {
+            90.. => Severity::Critical,
+            75..=89 => Severity::High,
+            _ => Severity::Medium,
+        },
+        source: format!("{}{namespace}", crate::database::YARA_PREFIX),
+        score: Some(score),
+        description,
+    }
+}
+
 /// Compile YARA rules (or validate one candidate file) in a short-lived child
 /// process: the compiler's memory peak and any crash stay out of the service.
 /// Unit tests (whose executable is the test harness) compile in-process.
@@ -782,6 +1112,147 @@ mod tests {
 rule High_Confidence { meta: score = 90 description = "test family" strings: $a = "HIGH-CONFIDENCE-MARKER" condition: $a }
 rule Low_Confidence  { meta: score = 60 strings: $a = "LOW-CONFIDENCE-MARKER" condition: $a }
 "#;
+
+    fn add_sig(engine: &Engine, data: &[u8], name: &str) {
+        let h = hasher::sha256_bytes(data);
+        engine
+            .db
+            .upsert_signatures("test@1", [(h.as_str(), name, Severity::High)])
+            .unwrap();
+    }
+
+    #[test]
+    fn archive_member_hash_match_quarantines_the_archive() {
+        let (dir, engine) = engine_with_rules(RULES);
+        let payload = b"MZ pretend trojan payload";
+        add_sig(&engine, payload, "Trojan.Test");
+        let zip = dir.path().join("invoice.zip");
+        std::fs::write(
+            &zip,
+            archive::tests::make_zip(&[("readme.txt", b"hi"), ("invoice.pdf.exe", payload)]),
+        )
+        .unwrap();
+        let v = engine.check_file(&zip, None).unwrap();
+        let hit = v.hit.clone().expect("member should match");
+        assert_eq!(hit.name, "Trojan.Test (inside invoice.zip/invoice.pdf.exe)");
+        engine.handle_detection(&zip, &v, None, "test");
+        assert!(!zip.exists());
+
+        // A clean archive is cached as clean.
+        let clean = dir.path().join("photos.zip");
+        std::fs::write(&clean, archive::tests::make_zip(&[("a.jpg", b"jpeg bytes")])).unwrap();
+        assert!(engine.check_file(&clean, None).unwrap().hit.is_none());
+        *engine.settings.write().unwrap() = Settings {
+            archive_scanning: false,
+            ..engine.settings()
+        };
+        std::fs::write(&zip, archive::tests::make_zip(&[("x.exe", payload)])).unwrap();
+        assert!(engine.check_file(&zip, None).unwrap().hit.is_none(), "disabled");
+    }
+
+    #[test]
+    fn yara_match_inside_iso_is_reported_with_member_path() {
+        let (dir, engine) = engine_with_rules(RULES);
+        let iso = dir.path().join("delivery.iso");
+        std::fs::write(
+            &iso,
+            archive::tests::make_iso(
+                &[("Document.lnk", b"shortcut"), ("run.ps1", b"HIGH-CONFIDENCE-MARKER")],
+                true,
+            ),
+        )
+        .unwrap();
+        let hit = engine.check_file(&iso, None).unwrap().hit.expect("YARA inside ISO");
+        assert_eq!(hit.name, "YARA.High_Confidence (inside delivery.iso/run.ps1)");
+        assert_eq!(hit.score, Some(90));
+    }
+
+    #[test]
+    fn startup_entries_are_removed_with_the_file_and_restored_with_it() {
+        let (dir, engine) = engine_with_rules(RULES);
+        let startup = dir.path().join("Startup");
+        std::fs::create_dir_all(&startup).unwrap();
+        let malware = dir.path().join("updater.exe");
+        let payload = b"MZ startup trojan";
+        std::fs::write(&malware, payload).unwrap();
+        add_sig(&engine, payload, "Trojan.Startup");
+        let shortcut = startup.join("Updater.desktop");
+        std::fs::write(&shortcut, format!("[Desktop Entry]\nExec={}\n", malware.display())).unwrap();
+        let unrelated = startup.join("Other.desktop");
+        std::fs::write(&unrelated, "Exec=/usr/bin/true").unwrap();
+
+        let v = engine.check_file(&malware, None).unwrap();
+        // handle_detection uses the real Startup folders; call the clean-up with ours.
+        let item = engine
+            .quarantine
+            .isolate(&engine.db, &malware, &v.sha256, "Trojan.Startup")
+            .unwrap();
+        assert_eq!(
+            engine.cleanup_startup(&malware, &item.id, std::slice::from_ref(&startup)),
+            1
+        );
+        assert!(!shortcut.exists(), "shortcut quarantined");
+        assert!(unrelated.exists());
+        assert_eq!(engine.db.quarantine_count(), 2);
+
+        engine.restore_quarantine(&item.id).unwrap();
+        assert!(malware.exists());
+        assert!(shortcut.exists(), "shortcut restored together with the file");
+        assert_eq!(engine.db.quarantine_count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn decoy_change_suspends_the_heavy_writer_and_terminate_quarantines_it() {
+        let _serial = realtime::decoy::tests::WRITER_TESTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (dir, engine) = engine_with_rules(RULES);
+        let profile = dir.path().join("home").join("alice");
+        std::fs::create_dir_all(profile.join("Documents")).unwrap();
+        assert_eq!(engine.plant_decoys_for_test(std::slice::from_ref(&profile)), 2);
+        let decoy = profile.join("Documents/!_Accounts_2026.xlsx");
+        assert!(engine.is_decoy(&decoy));
+
+        // "Ransomware": an unsigned copy of dd writing continuously.
+        let fake = dir.path().join("encryptor");
+        std::fs::copy("/bin/dd", &fake).unwrap();
+        let mut child = std::process::Command::new(&fake)
+            .args(["if=/dev/zero", "of=/dev/null", "bs=1M"])
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        std::fs::write(&decoy, b"encrypted!").unwrap();
+        engine.respond_to_decoy(&decoy);
+
+        let stat = std::fs::read_to_string(format!("/proc/{}/stat", child.id())).unwrap();
+        let state = stat[stat.rfind(')').unwrap() + 2..].chars().next().unwrap();
+        let events = engine.db.recent_events(10, None).unwrap();
+        let suspended = events
+            .iter()
+            .any(|e| matches!(e.kind, EventKind::ProcessSuspended) && e.pid == Some(child.id()));
+        if !suspended {
+            let _ = child.kill();
+            panic!(
+                "not suspended; events: {:?}",
+                events.iter().map(|e| &e.title).collect::<Vec<_>>()
+            );
+        }
+        assert_eq!(state, 'T', "process is stopped");
+
+        engine.process_action(child.id(), ProcessActionKind::Terminate).unwrap();
+        let _ = child.wait();
+        assert!(!fake.exists(), "its executable was quarantined");
+        assert!(engine
+            .db
+            .list_quarantine()
+            .unwrap()
+            .iter()
+            .any(|q| q.threat_name == "Behavior.Ransomware.Decoy"));
+        // The decoy was re-planted intact.
+        assert!(engine.is_decoy(&decoy));
+        assert_ne!(std::fs::read(&decoy).unwrap(), b"encrypted!");
+    }
 
     #[test]
     fn yara_high_score_match_is_quarantined() {

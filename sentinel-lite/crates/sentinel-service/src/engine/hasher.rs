@@ -53,6 +53,10 @@ pub fn sha256_file(path: &Path, max_bytes: u64) -> Result<(String, u64), SkipRea
     Ok((to_hex(&hasher.finalize()), total))
 }
 
+pub fn sha256_bytes(data: &[u8]) -> String {
+    to_hex(&Sha256::digest(data))
+}
+
 pub fn to_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut s = String::with_capacity(bytes.len() * 2);

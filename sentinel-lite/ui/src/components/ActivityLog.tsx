@@ -1,4 +1,6 @@
-import { Activity, AlertOctagon, Ban, Bug, DownloadCloud, FileWarning, Info, KeyRound, Lock, ScanLine, Settings2 } from "lucide-react";
+import { useState } from "react";
+import { Activity, AlertOctagon, Ban, Bug, DownloadCloud, FileWarning, Info, KeyRound, Lock, PauseCircle, Play, ScanLine, Settings2, Skull } from "lucide-react";
+import { api } from "../lib/api";
 import type { EventKind, SecurityEvent, Severity } from "../lib/types";
 import { shortPath, timeAgo } from "../lib/format";
 
@@ -6,6 +8,7 @@ const KIND_ICON: Record<EventKind, typeof Info> = {
   threat_detected: Bug,
   threat_quarantined: Lock,
   process_blocked: Ban,
+  process_suspended: PauseCircle,
   persistence_change: KeyRound,
   behavior_alert: AlertOctagon,
   scan_started: ScanLine,
@@ -45,10 +48,41 @@ export function ActivityLog({ events, limit, compact }: { events: SecurityEvent[
               </div>
               {e.path && <p className="truncate font-mono text-xs text-slate-500" title={e.path}>{shortPath(e.path, compact ? 56 : 96)}</p>}
               {!compact && e.detail && <p className="mt-0.5 text-xs text-slate-400">{e.detail}</p>}
+              {e.kind === "process_suspended" && e.pid != null && <SuspendedActions pid={e.pid} />}
             </div>
           </li>
         );
       })}
     </ul>
+  );
+}
+
+/** Decision buttons for a process the engine froze after a decoy was touched. */
+function SuspendedActions({ pid }: { pid: number }) {
+  const [state, setState] = useState<"idle" | "busy" | "done">("idle");
+  const [msg, setMsg] = useState<string | null>(null);
+  const act = async (action: "terminate" | "resume") => {
+    setState("busy");
+    setMsg(null);
+    try {
+      await api.processAction(pid, action);
+      setState("done");
+      setMsg(action === "terminate" ? "Terminated and quarantined." : "Resumed.");
+    } catch (err) {
+      setState("idle");
+      setMsg(String(err));
+    }
+  };
+  if (state === "done") return <p className="mt-2 text-xs text-emerald-400">{msg}</p>;
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-2">
+      <button disabled={state === "busy"} onClick={() => act("terminate")} className="flex items-center gap-1 rounded-md bg-rose-500/90 px-2.5 py-1 text-xs font-medium text-white hover:bg-rose-500 disabled:opacity-50">
+        <Skull className="h-3.5 w-3.5" /> Terminate &amp; quarantine
+      </button>
+      <button disabled={state === "busy"} onClick={() => act("resume")} title="Requires administrator approval" className="flex items-center gap-1 rounded-md border border-slate-700 px-2.5 py-1 text-xs text-slate-300 hover:border-amber-400/50 hover:text-amber-300 disabled:opacity-50">
+        <Play className="h-3.5 w-3.5" /> Resume (it's safe)
+      </button>
+      {msg && <span className="text-xs text-rose-400">{msg}</span>}
+    </div>
   );
 }

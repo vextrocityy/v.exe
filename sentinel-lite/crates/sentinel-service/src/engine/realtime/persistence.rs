@@ -10,7 +10,7 @@ use super::{sleep_or_stop, ShieldHandle, PERSISTENCE_WATCH};
 use crate::engine::{targets, Engine};
 use sentinel_protocol::{EventKind, Severity};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
@@ -149,7 +149,89 @@ fn expand_env(s: &str) -> String {
     out
 }
 
-fn startup_folders() -> Vec<PathBuf> {
+/// A startup entry removed because it launched a quarantined file.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub enum Removed {
+    /// A Run/RunOnce value; `expand` = REG_EXPAND_SZ.
+    RegistryValue {
+        root: String,
+        key: String,
+        name: String,
+        data: String,
+        expand: bool,
+    },
+    /// A service whose ImagePath was the file: disabled (Start = 4), not deleted.
+    ServiceDisabled { name: String, previous_start: u32 },
+    /// A Startup-folder item (shortcut, .desktop file) moved to quarantine.
+    StartupItem { quarantine_id: String },
+}
+
+/// Does this command string launch `target`?
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn launches(command: &str, target: &Path) -> bool {
+    let t = target.to_string_lossy().to_lowercase();
+    if t.len() < 4 {
+        return false;
+    }
+    let exe_matches = extract_executable(command).is_some_and(|p| p.to_string_lossy().to_lowercase() == t);
+    exe_matches || command.to_lowercase().contains(&t)
+}
+
+/// Startup-folder files that point at `target`: the file itself, or a
+/// shortcut whose bytes contain the path (ANSI or UTF-16LE, as .lnk stores it).
+pub fn startup_items_referencing(target: &Path, folders: &[PathBuf]) -> Vec<PathBuf> {
+    let t = target.to_string_lossy().to_lowercase();
+    let utf16: Vec<u8> = t.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+    let mut out = Vec::new();
+    for dir in folders {
+        let Ok(entries) = std::fs::read_dir(dir) else { continue };
+        for e in entries.flatten() {
+            let p = e.path();
+            if !p.is_file() || p.to_string_lossy().to_lowercase() == t {
+                continue; // the target itself is quarantined by the caller
+            }
+            let Ok(bytes) = std::fs::read(&p) else { continue };
+            if bytes.len() > 1024 * 1024 {
+                continue;
+            }
+            let lower: Vec<u8> = bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
+            let hit_ansi = lower.windows(t.len()).any(|w| w == t.as_bytes());
+            let hit_utf16 = lower.windows(utf16.len()).any(|w| w == utf16.as_slice());
+            if hit_ansi || hit_utf16 {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+/// Remove registry autostarts that launch `target`. Windows only.
+pub fn remove_registry_references(target: &Path) -> Vec<(Removed, String)> {
+    #[cfg(windows)]
+    {
+        registry::remove_references(target)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = target;
+        Vec::new()
+    }
+}
+
+/// Put a removed registry entry back.
+pub fn restore_registry(entry: &Removed) -> anyhow::Result<()> {
+    #[cfg(windows)]
+    {
+        registry::restore(entry)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = entry;
+        anyhow::bail!("registry entries exist only on Windows")
+    }
+}
+
+pub fn startup_folders() -> Vec<PathBuf> {
     let mut v = Vec::new();
     for profile in targets::user_profiles() {
         if cfg!(windows) {
@@ -194,9 +276,122 @@ fn collect() -> HashMap<String, String> {
 
 #[cfg(windows)]
 mod registry {
+    use super::{launches, Removed};
     use std::collections::HashMap;
-    use winreg::enums::{HKEY_LOCAL_MACHINE, HKEY_USERS, KEY_READ};
-    use winreg::RegKey;
+    use std::path::Path;
+    use winreg::enums::{RegType, HKEY_LOCAL_MACHINE, HKEY_USERS, KEY_READ, KEY_SET_VALUE};
+    use winreg::{RegKey, RegValue};
+
+    fn root(name: &str) -> RegKey {
+        RegKey::predef(if name == "HKLM" { HKEY_LOCAL_MACHINE } else { HKEY_USERS })
+    }
+
+    /// (root name, full subkey path) of every Run/RunOnce key we monitor.
+    fn run_keys() -> Vec<(&'static str, String)> {
+        let mut v: Vec<(&'static str, String)> = RUN_KEYS.iter().map(|k| ("HKLM", k.to_string())).collect();
+        for sid in RegKey::predef(HKEY_USERS).enum_keys().flatten() {
+            if sid.starts_with("S-1-5-21-") && !sid.ends_with("_Classes") {
+                for k in &RUN_KEYS[..2] {
+                    v.push(("HKU", format!(r"{sid}\{k}")));
+                }
+            }
+        }
+        v
+    }
+
+    pub fn remove_references(target: &Path) -> Vec<(Removed, String)> {
+        let mut out = Vec::new();
+        for (root_name, path) in run_keys() {
+            let Ok(key) = root(root_name).open_subkey_with_flags(&path, KEY_READ | KEY_SET_VALUE) else {
+                continue;
+            };
+            let values: Vec<(String, RegValue)> = key.enum_values().flatten().collect();
+            for (name, value) in values {
+                let expand = value.vtype == RegType::REG_EXPAND_SZ;
+                if !(expand || value.vtype == RegType::REG_SZ) {
+                    continue;
+                }
+                let data = value.to_string();
+                if launches(&data, target) && key.delete_value(&name).is_ok() {
+                    let desc = format!(r"{root_name}\{path}!{name}");
+                    out.push((
+                        Removed::RegistryValue {
+                            root: root_name.into(),
+                            key: path.clone(),
+                            name,
+                            data,
+                            expand,
+                        },
+                        desc,
+                    ));
+                }
+            }
+        }
+        let services_path = r"SYSTEM\CurrentControlSet\Services";
+        if let Ok(services) = RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey_with_flags(services_path, KEY_READ) {
+            for name in services.enum_keys().flatten() {
+                let Ok(svc) = services.open_subkey_with_flags(&name, KEY_READ | KEY_SET_VALUE) else {
+                    continue;
+                };
+                let Ok(image) = svc.get_value::<String, _>("ImagePath") else {
+                    continue;
+                };
+                if !launches(&image, target) {
+                    continue;
+                }
+                let previous: u32 = svc.get_value("Start").unwrap_or(3);
+                if previous != 4 && svc.set_value("Start", &4u32).is_ok() {
+                    out.push((
+                        Removed::ServiceDisabled {
+                            name: name.clone(),
+                            previous_start: previous,
+                        },
+                        format!("service {name} (disabled)"),
+                    ));
+                }
+            }
+        }
+        out
+    }
+
+    pub fn restore(entry: &Removed) -> anyhow::Result<()> {
+        match entry {
+            Removed::RegistryValue {
+                root: r,
+                key,
+                name,
+                data,
+                expand,
+            } => {
+                let (k, _) = root(r).create_subkey(key)?;
+                if *expand {
+                    let mut bytes: Vec<u8> = data
+                        .encode_utf16()
+                        .chain(Some(0))
+                        .flat_map(|u| u.to_le_bytes())
+                        .collect();
+                    bytes.shrink_to_fit();
+                    k.set_raw_value(
+                        name,
+                        &RegValue {
+                            bytes,
+                            vtype: RegType::REG_EXPAND_SZ,
+                        },
+                    )?;
+                } else {
+                    k.set_value(name, data)?;
+                }
+                Ok(())
+            }
+            Removed::ServiceDisabled { name, previous_start } => {
+                let svc = RegKey::predef(HKEY_LOCAL_MACHINE)
+                    .open_subkey_with_flags(format!(r"SYSTEM\CurrentControlSet\Services\{name}"), KEY_SET_VALUE)?;
+                svc.set_value("Start", previous_start)?;
+                Ok(())
+            }
+            Removed::StartupItem { .. } => Ok(()),
+        }
+    }
 
     const RUN_KEYS: &[&str] = &[
         r"Software\Microsoft\Windows\CurrentVersion\Run",
@@ -269,6 +464,52 @@ mod tests {
             extract_executable(r"\??\C:\drivers\x.sys"),
             Some(PathBuf::from(r"C:\drivers\x.sys"))
         );
+    }
+
+    #[test]
+    fn finds_startup_items_that_launch_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let startup = dir.path().join("Startup");
+        std::fs::create_dir_all(&startup).unwrap();
+        let target = PathBuf::from(r"C:\Users\bob\AppData\Roaming\evil\updater.exe");
+        // .lnk files store the path as UTF-16LE; .desktop / .bat as plain text (any case).
+        let utf16: Vec<u8> = target
+            .to_string_lossy()
+            .encode_utf16()
+            .flat_map(|u| u.to_le_bytes())
+            .collect();
+        std::fs::write(
+            startup.join("Updater.lnk"),
+            [b"L\0\0\0junk".as_slice(), &utf16, b"more"].concat(),
+        )
+        .unwrap();
+        std::fs::write(
+            startup.join("run.bat"),
+            b"start \"\" \"C:\\USERS\\BOB\\APPDATA\\ROAMING\\EVIL\\UPDATER.EXE\"",
+        )
+        .unwrap();
+        std::fs::write(
+            startup.join("OneDrive.lnk"),
+            b"C:\\Program Files\\Microsoft OneDrive\\OneDrive.exe",
+        )
+        .unwrap();
+        let mut found = startup_items_referencing(&target, std::slice::from_ref(&startup));
+        found.sort();
+        assert_eq!(found, vec![startup.join("Updater.lnk"), startup.join("run.bat")]);
+    }
+
+    #[test]
+    fn launches_matches_command_lines() {
+        let t = Path::new(r"C:\Users\bob\AppData\Roaming\evil\updater.exe");
+        assert!(launches(
+            r#""C:\Users\Bob\AppData\Roaming\evil\updater.exe" --silent"#,
+            t
+        ));
+        assert!(launches(
+            r"rundll32.exe C:\Users\bob\AppData\Roaming\evil\updater.exe,Run",
+            t
+        ));
+        assert!(!launches(r"C:\Program Files\App\updater.exe", t));
     }
 
     #[test]

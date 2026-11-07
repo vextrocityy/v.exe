@@ -14,6 +14,9 @@ what it does.
 - [x] Corrupt-database recovery, schema migrations, rotating logs
 - [x] Installer (NSIS, per-machine) that installs, upgrades and removes the service; tray app with notifications
 - [x] YARA scanning (YARA-X) with the YARA Forge core package, score-based remediation, verdict cache, child-process compilation
+- [x] Archive scanning (ZIP / Office / ISO, nested once, bomb-proof)
+- [x] Ransomware decoys with suspend-the-heaviest-writer response (reversible)
+- [x] Startup clean-up on quarantine, reversed on restore
 - [x] Windows CI: real service install + ETW/File Shield/Process Guard/elevation smoke test + installer install/uninstall
 
 ## Known limitations
@@ -21,7 +24,7 @@ what it does.
 | Area | Today | Why it matters |
 |---|---|---|
 | Pre-execution blocking | Processes are checked *as* they start (ETW), then killed | Malware gets milliseconds of execution. True blocking needs a kernel callback. |
-| File writes | Seen after the fact (`ReadDirectoryChangesW`), no writer PID | Ransomware alerts cannot name or stop the process yet. |
+| File writes | Seen after the fact (`ReadDirectoryChangesW`), no writer PID | Decoys catch ransomware early, but the culprit is identified by write volume, not attribution: a signed or Windows binary (e.g. a LOLBin) is never suspended, and some files can be encrypted before the decoy is reached. |
 | Tamper protection | An administrator (or malware running as one) can stop the service | Needs a protected process (ELAM + PPL). |
 | Detection breadth | Hashes + YARA rules + behavioural rules | Variants of known families are caught; genuinely novel malware that no rule describes, fileless/in-memory attacks and obfuscated scripts (no AMSI yet) are not. No cloud reputation. |
 | Official signature content | The channel and signing exist, but there is no threat-research team producing packs | The community feed is the only real-world source out of the box. |
@@ -35,7 +38,7 @@ what it does.
 - [ ] **AMSI provider** DLL so PowerShell/VBScript/JScript content is inspected after de-obfuscation.
 - [ ] **ETW file I/O + network** providers to attribute mass modification to a PID and suspend it.
 - [ ] Signed allow-list packs (retract false positives centrally).
-- [ ] Canary (decoy) files in Documents for high-confidence ransomware detection.
+- [ ] Exact writer attribution for decoy changes via the ETW Kernel-File provider.
 - [ ] `RegNotifyChangeKeyValue` instead of polling; Scheduled Tasks + WMI subscriptions as persistence sources.
 - [ ] Dashboard auto-update (Tauri updater) for the UI and engine.
 

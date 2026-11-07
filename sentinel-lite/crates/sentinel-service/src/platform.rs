@@ -273,6 +273,52 @@ mod imp {
         set_dacl(path, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;IU)")
     }
 
+    /// Total bytes written by `pid` since it started.
+    pub fn write_bytes(pid: u32) -> Option<u64> {
+        use windows_sys::Win32::System::Threading::{GetProcessIoCounters, IO_COUNTERS};
+        let h = Handle::open(PROCESS_QUERY_LIMITED_INFORMATION, pid)?;
+        let mut c: IO_COUNTERS = unsafe { std::mem::zeroed() };
+        (unsafe { GetProcessIoCounters(h.0, &mut c) } != 0).then_some(c.WriteTransferCount)
+    }
+
+    #[link(name = "ntdll")]
+    extern "system" {
+        fn NtSuspendProcess(h: HANDLE) -> i32;
+        fn NtResumeProcess(h: HANDLE) -> i32;
+    }
+
+    /// Freeze every thread of `pid` (reversible with `resume`).
+    pub fn suspend(pid: u32) -> bool {
+        use windows_sys::Win32::System::Threading::PROCESS_SUSPEND_RESUME;
+        match Handle::open(PROCESS_SUSPEND_RESUME, pid) {
+            Some(h) => unsafe { NtSuspendProcess(h.0) >= 0 },
+            None => false,
+        }
+    }
+
+    pub fn resume(pid: u32) -> bool {
+        use windows_sys::Win32::System::Threading::PROCESS_SUSPEND_RESUME;
+        match Handle::open(PROCESS_SUSPEND_RESUME, pid) {
+            Some(h) => unsafe { NtResumeProcess(h.0) >= 0 },
+            None => false,
+        }
+    }
+
+    /// Hidden + system: invisible in Explorer by default (decoy files).
+    pub fn hide_file(path: &Path) {
+        use windows_sys::Win32::Storage::FileSystem::{
+            SetFileAttributesW, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_SYSTEM,
+        };
+        let w = wide(path);
+        unsafe { SetFileAttributesW(w.as_ptr(), FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM) };
+    }
+
+    pub fn unhide_file(path: &Path) {
+        use windows_sys::Win32::Storage::FileSystem::{SetFileAttributesW, FILE_ATTRIBUTE_NORMAL};
+        let w = wide(path);
+        unsafe { SetFileAttributesW(w.as_ptr(), FILE_ATTRIBUTE_NORMAL) };
+    }
+
     /// Background mode lowers CPU *and* I/O priority for the current thread,
     /// so scans yield to the user's foreground work.
     pub struct BackgroundPriority(bool);
@@ -369,6 +415,34 @@ mod imp {
     pub fn has_valid_signature(_path: &std::path::Path) -> bool {
         false
     }
+
+    pub fn write_bytes(pid: u32) -> Option<u64> {
+        let io = std::fs::read_to_string(format!("/proc/{pid}/io")).ok()?;
+        // `wchar` counts bytes passed to write(), including page-cache writes.
+        io.lines()
+            .find_map(|l| l.strip_prefix("wchar:"))
+            .and_then(|v| v.trim().parse().ok())
+    }
+
+    fn signal(pid: u32, sig: &str) -> bool {
+        std::process::Command::new("kill")
+            .args([sig, &pid.to_string()])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    pub fn suspend(pid: u32) -> bool {
+        signal(pid, "-STOP")
+    }
+
+    pub fn resume(pid: u32) -> bool {
+        signal(pid, "-CONT")
+    }
+
+    pub fn hide_file(_path: &std::path::Path) {}
+
+    pub fn unhide_file(_path: &std::path::Path) {}
 
     /// Dev hosts: root, or the same user the service runs as.
     pub fn is_process_elevated(pid: u32) -> bool {

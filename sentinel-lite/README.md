@@ -106,6 +106,22 @@ Data lives in `%ProgramData%\SentinelLite\` (`sentinel.db`, `quarantine\`, `sign
 6. **Behaviour Engine** (alerts only, never auto-kills): process lineage / command-line shape,
    and ransomware-style mass modification across folders.
 7. **Scheduled quick scan** every 24 h at background CPU/IO priority.
+8. **Archive scanning.** ZIP files (including Office documents, JAR/APK) and ISO/IMG disc images
+   are opened in memory and every member is hash-checked and YARA-scanned, following one level of
+   nesting (a ZIP inside an ISO). Limits on total size, member size, member count and compression
+   ratio make zip bombs harmless. A malicious member quarantines the whole archive; clean archives
+   are cached.
+9. **Ransomware decoys.** Hidden decoy files (`!_Accounts_2026.xlsx`, `!_IMG_0001.jpg`, …) sit in
+   every profile's Documents, Pictures and Desktop. When one changes, the engine confirms the
+   change by re-hashing it, samples per-process disk writes for one second, and **suspends** the
+   heaviest writer. Suspending is reversible: Activity offers **Terminate & quarantine** or **Resume**
+   (Resume needs administrator approval). Windows components and validly code-signed programs are
+   never suspended. Damaged decoys are re-planted, and decoys changed while protection was off are
+   reported at the next start.
+10. **Startup clean-up.** When a file is quarantined, the Run/RunOnce values (machine and every
+    user), Startup-folder shortcuts and services that launch it are removed. Services are disabled
+    rather than deleted. Every removal is recorded, and restoring the file from quarantine puts its
+    startup entries back.
 
 ### False-positive safety
 

@@ -88,7 +88,7 @@ pub fn is_allowed_update_url(u: &str) -> bool {
 /// Empty = the change is neutral or strengthening and needs no elevation.
 pub fn weakenings(old: &Settings, new: &Settings) -> Vec<String> {
     let mut out = Vec::new();
-    let flags: [(&str, bool, bool); 11] = [
+    let flags: [(&str, bool, bool); 15] = [
         ("real-time protection", old.realtime_protection, new.realtime_protection),
         ("Process Guard", old.process_monitor, new.process_monitor),
         ("File Shield", old.file_monitor, new.file_monitor),
@@ -104,6 +104,10 @@ pub fn weakenings(old: &Settings, new: &Settings) -> Vec<String> {
         ("community threat feeds", old.community_feeds, new.community_feeds),
         ("YARA scanning", old.yara_enabled, new.yara_enabled),
         ("the YARA rules feed", old.yara_rules_feed, new.yara_rules_feed),
+        ("archive scanning", old.archive_scanning, new.archive_scanning),
+        ("ransomware decoys", old.ransomware_decoys, new.ransomware_decoys),
+        ("suspending ransomware", old.ransomware_suspend, new.ransomware_suspend),
+        ("startup clean-up", old.startup_cleanup, new.startup_cleanup),
     ];
     for (name, before, after) in flags {
         if before && !after {

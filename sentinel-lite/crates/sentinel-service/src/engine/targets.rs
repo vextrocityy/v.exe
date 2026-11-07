@@ -92,6 +92,7 @@ pub fn watch_roots(extra: &[String]) -> Vec<PathBuf> {
     let mut v = hot_folders();
     for profile in user_profiles() {
         v.push(profile.join("Documents"));
+        v.push(profile.join("Pictures")); // ransomware decoys live here too
     }
     v.extend(extra.iter().map(PathBuf::from));
     existing(v)

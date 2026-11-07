@@ -12,7 +12,7 @@ pub const PIPE_NAME: &str = r"\\.\pipe\sentinel_lite_ipc";
 /// Hard upper bound on one frame; protects the service from memory exhaustion.
 pub const MAX_FRAME_BYTES: u32 = 4 * 1024 * 1024;
 /// Bumped on any incompatible change; the UI refuses to talk to a different version.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 /// Placeholder sent instead of stored secrets; sending it back means "unchanged".
 pub const SECRET_MASK: &str = "********";
 
@@ -103,6 +103,8 @@ pub enum EventKind {
     ThreatDetected,
     ThreatQuarantined,
     ProcessBlocked,
+    /// A process was suspended (reversible); the user decides to resume or terminate it.
+    ProcessSuspended,
     PersistenceChange,
     BehaviorAlert,
     ScanStarted,
@@ -177,6 +179,14 @@ pub struct Settings {
     pub yara_min_remediate_score: u32,
     /// Larger files are not YARA-scanned (hash checks still apply).
     pub yara_max_file_mb: u64,
+    /// Look inside ZIP (incl. Office documents) and ISO/IMG files.
+    pub archive_scanning: bool,
+    /// Plant hidden decoy files in Documents, Pictures and Desktop; touching one is treated as ransomware.
+    pub ransomware_decoys: bool,
+    /// When a decoy is modified, suspend the process that is writing the most (reversible).
+    pub ransomware_suspend: bool,
+    /// When a file is quarantined, also remove the startup entries that launch it (restored with the file).
+    pub startup_cleanup: bool,
 }
 
 impl Default for Settings {
@@ -206,6 +216,10 @@ impl Default for Settings {
             yara_rules_feed: true,
             yara_min_remediate_score: 75,
             yara_max_file_mb: 32,
+            archive_scanning: true,
+            ransomware_decoys: true,
+            ransomware_suspend: true,
+            startup_cleanup: true,
         }
     }
 }
@@ -231,6 +245,11 @@ pub enum Request {
     AcknowledgeThreats,
     /// Download signature updates now.
     UpdateSignatures,
+    /// Resume or terminate a process the engine suspended.
+    ProcessAction {
+        pid: u32,
+        action: ProcessActionKind,
+    },
     GetEvents {
         limit: u32,
         before_id: Option<i64>,
@@ -248,6 +267,13 @@ pub enum Request {
     },
     /// Turn the connection into a push stream of `Response::Event`.
     Subscribe,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessActionKind {
+    Resume,
+    Terminate,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

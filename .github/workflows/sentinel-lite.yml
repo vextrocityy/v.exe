@@ -26,6 +26,8 @@ jobs:
       - run: cargo clippy --locked -p sentinel-service -p sentinel-protocol --all-targets -- -D warnings
       - run: cargo test --locked -p sentinel-service -p sentinel-protocol
       - run: cargo build --locked --release -p sentinel-service
+      - name: Build smoke-test helper (benign unsigned disk writer)
+        run: cargo build --locked --release -p sentinel-service --example write_load
       - name: End-to-end smoke test (installs the real service)
         shell: pwsh
         env:
