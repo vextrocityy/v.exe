@@ -187,7 +187,10 @@ mod imp {
                     ),
                     "FwpmEngineOpen0",
                 )?;
-                let fw = Firewall { engine, ranges: 0 };
+                // Owns the session from here on: any early return closes it exactly once.
+                // (Never build the result with `..fw`: that copies the handle and then
+                // drops `fw`, closing the session under the returned value.)
+                let mut fw = Firewall { engine, ranges: 0 };
                 check(FwpmTransactionBegin0(engine, 0), "FwpmTransactionBegin0")?;
                 let result = (|| -> Result<usize> {
                     let mut sublayer: FWPM_SUBLAYER0 = std::mem::zeroed();
@@ -232,7 +235,8 @@ mod imp {
                 match result {
                     Ok(n) => {
                         check(FwpmTransactionCommit0(engine), "FwpmTransactionCommit0")?;
-                        Ok(Firewall { ranges: n, ..fw })
+                        fw.ranges = n;
+                        Ok(fw)
                     }
                     Err(e) => {
                         FwpmTransactionAbort0(engine);

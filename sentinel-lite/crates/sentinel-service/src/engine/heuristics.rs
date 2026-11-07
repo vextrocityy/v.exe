@@ -260,6 +260,19 @@ impl RansomwareDetector {
         }
     }
 
+    /// The most recent *distinct* files: one busy file (a log, a download, a
+    /// program's scratch file) must not crowd the real victims out of the sample.
+    fn recent_distinct(&self, n: usize) -> Vec<PathBuf> {
+        let mut seen = std::collections::HashSet::new();
+        self.events
+            .iter()
+            .rev()
+            .filter(|(_, _, p)| seen.insert(p.clone()))
+            .take(n)
+            .map(|(_, _, p)| p.clone())
+            .collect()
+    }
+
     pub fn record(&mut self, path: &Path, activity: FileActivity) -> Option<RansomwareAlert> {
         self.record_at(Instant::now(), path, activity)
     }
@@ -313,7 +326,7 @@ impl RansomwareDetector {
         Some(RansomwareAlert {
             weight: total,
             directories: dirs.len(),
-            sample_paths: self.events.iter().rev().take(5).map(|(_, _, p)| p.clone()).collect(),
+            sample_paths: self.recent_distinct(12),
             notify,
         })
     }
@@ -438,6 +451,25 @@ mod tests {
         let notes = dir.path().join("notes.txt");
         std::fs::write(&notes, text).unwrap();
         assert!(!looks_encrypted(&notes));
+    }
+
+    #[test]
+    fn samples_are_distinct_so_a_busy_file_cannot_hide_the_victims() {
+        let start = Instant::now();
+        let mut d = RansomwareDetector::default();
+        let mut alert = None;
+        for i in 0..80 {
+            // One noisy file rewritten constantly, interleaved with the real victims.
+            let noise = PathBuf::from("/tmp/app/scratch.bin");
+            for _ in 0..5 {
+                d.record_at(start, &noise, FileActivity::Modified);
+            }
+            let victim = PathBuf::from(format!("/home/u/Documents/dir{}/doc{i}.txt", i % 4));
+            alert = d.record_at(start, &victim, FileActivity::Modified).or(alert);
+        }
+        let a = alert.expect("burst detected");
+        assert_eq!(a.sample_paths.iter().filter(|p| p.ends_with("scratch.bin")).count(), 1);
+        assert!(a.sample_paths.len() >= 6, "{:?}", a.sample_paths);
     }
 
     #[test]

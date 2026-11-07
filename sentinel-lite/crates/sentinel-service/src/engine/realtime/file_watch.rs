@@ -86,7 +86,9 @@ pub fn start(engine: Arc<Engine>) -> Result<ShieldHandle, String> {
                                         } else {
                                             0
                                         };
-                                        if encrypted >= 3 {
+                                        // At least 3 of the sampled distinct files, and at least
+                                        // half of them, must now look encrypted.
+                                        if encrypted >= 3 && encrypted * 2 >= alert.sample_paths.len() {
                                             engine.on_mass_encryption(alert.sample_paths.clone(), encrypted);
                                         } else if alert.notify {
                                             raise_ransomware_alert(&engine, &alert);

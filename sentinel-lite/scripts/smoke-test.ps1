@@ -31,6 +31,15 @@ function Wait-Until([scriptblock]$Condition, [string]$What, [int]$Seconds = 60) 
 $writeLoad = (Resolve-Path "target/release/examples/write_load.exe").Path
 # Terminate quarantines a writer's executable, so every test runs its own copy.
 function New-Writer([string]$Name) { $dst = Join-Path $work $Name; Copy-Item $writeLoad $dst -Force; $dst }
+# Network Guard: a connection to the blocked TEST-NET range must be refused by WFP (WSAEACCES = 10013).
+function Assert-Blocked([string]$When) {
+    $client = New-Object System.Net.Sockets.TcpClient
+    $code = 0
+    try { $client.ConnectAsync("192.0.2.1", 443).Wait(5000) | Out-Null } catch { $code = $_.Exception.InnerException.InnerException.ErrorCode; if (-not $code) { $code = $_.Exception.InnerException.ErrorCode } }
+    $client.Dispose()
+    if ($code -ne 10013) { throw "FAIL: blocked range not refused by WFP $When (error $code; 10013 expected)" }
+    Write-Host "PASS: connection to blocked range refused instantly $When (WSAEACCES)" -ForegroundColor Green
+}
 function New-UniqueCopy([string]$From, [string]$To) {
     Copy-Item $From $To -Force
     $tag = [Text.Encoding]::ASCII.GetBytes("sentinel-smoke-" + [guid]::NewGuid())
@@ -134,12 +143,7 @@ try {
 
     # --- Network Guard: WFP refuses the connection immediately ----------------------
     Wait-Until { (Status).network_blocked_ranges -ge 1 } "Network Guard installed WFP filters"
-    $client = New-Object System.Net.Sockets.TcpClient
-    $code = 0
-    try { $client.ConnectAsync("192.0.2.1", 443).Wait(5000) | Out-Null } catch { $code = $_.Exception.InnerException.InnerException.ErrorCode; if (-not $code) { $code = $_.Exception.InnerException.ErrorCode } }
-    $client.Dispose()
-    if ($code -ne 10013) { throw "FAIL: connection to a blocked range was not refused by WFP (error $code; 10013 expected)" }
-    Write-Host "PASS: connection to blocked range refused instantly (WSAEACCES)" -ForegroundColor Green
+    Assert-Blocked "after install"
 
     # --- Execution Guard: unsigned program from Downloads is stopped, then allowed --
     $tool = Join-Path $downloads "unsigned-tool.exe"
@@ -197,6 +201,9 @@ try {
     $hex = -join ([Text.Encoding]::UTF8.GetBytes($json) | ForEach-Object { $_.ToString("x2") })
     Invoke-Svc elevated-request $hex | Out-Host
     Wait-Until { (Invoke-Svc settings | Out-String | ConvertFrom-Json).data.exclusions -contains "C:\sentinel-smoke-excluded" } "elevated settings change applied"
+    # The settings change restarted every shield, including Network Guard's WFP session.
+    Wait-Until { (Status).network_blocked_ranges -ge 1 } "Network Guard reinstalled after the settings change"
+    Assert-Blocked "after a settings change"
 
     # --- YARA Forge feed: download, validate, compile; restart to load ----------------
     $out = & $svc update 2>&1 | Out-String
