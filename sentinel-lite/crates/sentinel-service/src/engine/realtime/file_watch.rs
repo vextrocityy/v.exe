@@ -88,7 +88,7 @@ pub fn start(engine: Arc<Engine>) -> Result<ShieldHandle, String> {
                                         };
                                         if encrypted >= 3 {
                                             engine.on_mass_encryption(alert.sample_paths.clone(), encrypted);
-                                        } else {
+                                        } else if alert.notify {
                                             raise_ransomware_alert(&engine, &alert);
                                         }
                                     }

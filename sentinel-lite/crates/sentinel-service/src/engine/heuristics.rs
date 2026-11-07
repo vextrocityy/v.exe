@@ -225,6 +225,9 @@ pub struct RansomwareAlert {
     pub weight: u32,
     pub directories: usize,
     pub sample_paths: Vec<PathBuf>,
+    /// False while the plain "mass modification" notification is cooling down.
+    /// Detection (e.g. the entropy check) must still act on the alert.
+    pub notify: bool,
 }
 
 pub struct RansomwareDetector {
@@ -234,6 +237,7 @@ pub struct RansomwareDetector {
     cooldown: Duration,
     events: VecDeque<(Instant, u32, PathBuf)>,
     last_alert: Option<Instant>,
+    last_eval: Option<Instant>,
 }
 
 impl Default for RansomwareDetector {
@@ -252,6 +256,7 @@ impl RansomwareDetector {
             cooldown: Duration::from_secs(60),
             events: VecDeque::new(),
             last_alert: None,
+            last_eval: None,
         }
     }
 
@@ -278,10 +283,12 @@ impl RansomwareDetector {
             self.events.pop_front();
         }
 
-        if let Some(t) = self.last_alert {
-            if now.duration_since(t) < self.cooldown {
-                return None;
-            }
+        // Evaluate at most once a second during a burst (callers read files on an alert).
+        if self
+            .last_eval
+            .is_some_and(|t| now.duration_since(t) < Duration::from_secs(1))
+        {
+            return None;
         }
         let total: u32 = self.events.iter().map(|(_, w, _)| w).sum();
         if total < self.weight_threshold {
@@ -296,11 +303,18 @@ impl RansomwareDetector {
         if dirs.len() < self.min_directories {
             return None;
         }
-        self.last_alert = Some(now);
+        self.last_eval = Some(now);
+        // The cooldown only throttles the notification, never detection: an
+        // earlier benign burst must not blind us to real encryption a minute later.
+        let notify = self.last_alert.is_none_or(|t| now.duration_since(t) >= self.cooldown);
+        if notify {
+            self.last_alert = Some(now);
+        }
         Some(RansomwareAlert {
             weight: total,
             directories: dirs.len(),
             sample_paths: self.events.iter().rev().take(5).map(|(_, _, p)| p.clone()).collect(),
+            notify,
         })
     }
 }
@@ -424,6 +438,27 @@ mod tests {
         let notes = dir.path().join("notes.txt");
         std::fs::write(&notes, text).unwrap();
         assert!(!looks_encrypted(&notes));
+    }
+
+    #[test]
+    fn cooldown_throttles_notification_not_detection() {
+        let start = Instant::now();
+        let mut d = RansomwareDetector::default();
+        let burst = |d: &mut RansomwareDetector, t: Instant| {
+            let mut first = None;
+            for i in 0..40 {
+                let p = PathBuf::from(format!("/home/u/Documents/dir{}/doc{i}.docx.locked", i % 8));
+                first = first.or(d.record_at(t, &p, FileActivity::RenamedNewExtension));
+            }
+            first
+        };
+        let a = burst(&mut d, start).expect("first burst detected");
+        assert!(a.notify);
+        // 20 s later: still within the 60 s notification cooldown, but detection still fires.
+        let b = burst(&mut d, start + Duration::from_secs(20)).expect("second burst still detected");
+        assert!(!b.notify);
+        let c = burst(&mut d, start + Duration::from_secs(90)).expect("third burst");
+        assert!(c.notify);
     }
 
     #[test]
