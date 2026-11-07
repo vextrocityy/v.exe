@@ -99,3 +99,51 @@ jobs:
         with:
           name: sentinel-lite-installer
           path: sentinel-lite/target/release/bundle/nsis/*-setup.exe
+
+  release:
+    name: Publish GitHub Release
+    # Only builds that passed the Windows smoke test AND the install/uninstall test.
+    needs: [engine, installer]
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: sentinel-lite-installer
+          path: dist
+      - name: Checksums and release notes
+        id: meta
+        run: |
+          cd dist
+          sha256sum *.exe > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          echo "tag=sentinel-lite-build-${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+          {
+            echo "Automated build of commit ${GITHUB_SHA::7} on ${GITHUB_REF_NAME}."
+            echo
+            echo "This build passed the Windows smoke test (real service install, File Shield, Process Guard,"
+            echo "YARA, archive scanning, ransomware decoys, startup clean-up) and the silent install/uninstall test."
+            echo
+            echo "**Personal, unsigned test build.** Windows SmartScreen will warn: choose *More info → Run anyway*."
+            echo "Keep Microsoft Defender enabled alongside it."
+            echo
+            echo "SHA-256:"
+            echo '```'
+            cat SHA256SUMS.txt
+            echo '```'
+          } > ../notes.md
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: Sentinel-Lite build ${{ github.run_number }}
+          body_path: notes.md
+          make_latest: true
+          files: |
+            dist/*.exe
+            dist/SHA256SUMS.txt
