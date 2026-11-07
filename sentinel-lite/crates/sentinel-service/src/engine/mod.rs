@@ -85,7 +85,8 @@ pub struct Engine {
     suspended: Mutex<std::collections::HashMap<u32, PathBuf>>,
     last_decoy_response: Mutex<Option<Instant>>,
     firewall: Mutex<Option<netguard::Firewall>>,
-    cpu_sample: Mutex<Option<(Instant, std::time::Duration)>>,
+    /// (sample time, CPU time used so far, last computed %).
+    cpu_sample: Mutex<(Instant, Option<std::time::Duration>, Option<f32>)>,
     app_update_status: Mutex<Option<String>>,
     app_update_running: AtomicBool,
     started: Instant,
@@ -119,7 +120,8 @@ impl Engine {
             suspended: Mutex::new(std::collections::HashMap::new()),
             last_decoy_response: Mutex::new(None),
             firewall: Mutex::new(None),
-            cpu_sample: Mutex::new(None),
+            // Baseline at start-up, so the first status request already has a reading.
+            cpu_sample: Mutex::new((Instant::now(), crate::platform::own_cpu_time(), None)),
             app_update_status: Mutex::new(None),
             app_update_running: AtomicBool::new(false),
             started: Instant::now(),
@@ -831,15 +833,21 @@ impl Engine {
         Ok(msg)
     }
 
+    /// Engine CPU % since the previous sample. Requests arriving sooner than
+    /// 0.5 s after the last sample get the last value instead of resetting the
+    /// baseline, so several clients polling at once never starve the reading.
     fn cpu_percent(&self) -> Option<f32> {
-        let now = (Instant::now(), crate::platform::own_cpu_time()?);
-        let prev = lock(&self.cpu_sample).replace(now)?;
-        let wall = now.0.duration_since(prev.0).as_secs_f32();
-        if wall < 0.2 {
-            return None;
+        let mut sample = lock(&self.cpu_sample);
+        let (at, used, last) = *sample;
+        let wall = at.elapsed().as_secs_f32();
+        if wall < 0.5 {
+            return last;
         }
+        let now_used = crate::platform::own_cpu_time()?;
         let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1) as f32;
-        Some(((now.1.saturating_sub(prev.1)).as_secs_f32() / wall / cpus * 100.0).min(100.0))
+        let pct = used.map(|u| (now_used.saturating_sub(u).as_secs_f32() / wall / cpus * 100.0).min(100.0));
+        *sample = (Instant::now(), Some(now_used), pct.or(last));
+        pct.or(last)
     }
 
     // ----- ransomware decoys -------------------------------------------------------------
@@ -1523,6 +1531,17 @@ rule Low_Confidence  { meta: score = 60 strings: $a = "LOW-CONFIDENCE-MARKER" co
         // The decoy was re-planted intact.
         assert!(engine.is_decoy(&decoy));
         assert_ne!(std::fs::read(&decoy).unwrap(), b"encrypted!");
+    }
+
+    #[test]
+    fn cpu_reading_survives_rapid_polling() {
+        let (_dir, engine) = engine_with_rules(RULES);
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        let first = engine.cpu_percent();
+        assert!(first.is_some(), "baseline taken at start-up");
+        for _ in 0..20 {
+            assert_eq!(engine.cpu_percent(), first, "rapid polls reuse the last value");
+        }
     }
 
     #[test]
