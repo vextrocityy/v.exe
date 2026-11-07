@@ -18,7 +18,7 @@ impl AuthToken {
         Ok(Self(crate::engine::hasher::to_hex(&b)))
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub fn from_string(s: &str) -> Self {
         Self(s.to_string())
     }

@@ -60,7 +60,11 @@ fn run_service() -> Result<()> {
         _ => ServiceControlHandlerResult::NotImplemented,
     })?;
 
-    handle.set_service_status(status(ServiceState::Running, ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN, 0))?;
+    handle.set_service_status(status(
+        ServiceState::Running,
+        ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
+        0,
+    ))?;
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2) // the engine's heavy lifting is on dedicated threads
@@ -75,9 +79,8 @@ fn run_service() -> Result<()> {
     result
 }
 
-pub fn install() -> Result<()> {
-    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE)?;
-    let info = ServiceInfo {
+fn service_info() -> Result<ServiceInfo> {
+    Ok(ServiceInfo {
         name: SERVICE_NAME.into(),
         display_name: DISPLAY_NAME.into(),
         service_type: SERVICE_TYPE,
@@ -88,8 +91,39 @@ pub fn install() -> Result<()> {
         dependencies: vec![],
         account_name: None, // LocalSystem: required for ETW kernel providers and all-profile scans
         account_password: None,
+    })
+}
+
+fn wait_for(service: &windows_service::service::Service, state: ServiceState) -> Result<()> {
+    for _ in 0..60 {
+        if service.query_status()?.current_state == state {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    anyhow::bail!("timed out waiting for service to reach {state:?}")
+}
+
+/// Idempotent: installs, or (on upgrade) stops, reconfigures and restarts.
+pub fn install() -> Result<()> {
+    let manager = ServiceManager::local_computer(
+        None::<&str>,
+        ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE,
+    )?;
+    let info = service_info()?;
+    let access =
+        ServiceAccess::QUERY_STATUS | ServiceAccess::CHANGE_CONFIG | ServiceAccess::START | ServiceAccess::STOP;
+    let service = match manager.open_service(SERVICE_NAME, access) {
+        Ok(existing) => {
+            if existing.query_status()?.current_state != ServiceState::Stopped {
+                let _ = existing.stop();
+                wait_for(&existing, ServiceState::Stopped)?;
+            }
+            existing.change_config(&info)?;
+            existing
+        }
+        Err(_) => manager.create_service(&info, access)?,
     };
-    let service = manager.create_service(&info, ServiceAccess::CHANGE_CONFIG | ServiceAccess::START)?;
     service.set_description("Real-time malware protection engine for Sentinel-Lite.")?;
     // Restart automatically if the engine ever crashes.
     service.update_failure_actions(ServiceFailureActions {
@@ -97,19 +131,51 @@ pub fn install() -> Result<()> {
         reboot_msg: None,
         command: None,
         actions: Some(vec![
-            ServiceAction { action_type: ServiceActionType::Restart, delay: Duration::from_secs(5) },
-            ServiceAction { action_type: ServiceActionType::Restart, delay: Duration::from_secs(30) },
-            ServiceAction { action_type: ServiceActionType::Restart, delay: Duration::from_secs(120) },
+            ServiceAction {
+                action_type: ServiceActionType::Restart,
+                delay: Duration::from_secs(5),
+            },
+            ServiceAction {
+                action_type: ServiceActionType::Restart,
+                delay: Duration::from_secs(30),
+            },
+            ServiceAction {
+                action_type: ServiceActionType::Restart,
+                delay: Duration::from_secs(120),
+            },
         ]),
     })?;
+    // Also apply the failure actions when the process exits with an error, not only on crashes.
+    service.set_failure_actions_on_non_crash_failures(true)?;
     service.start::<&str>(&[])?;
-    println!("Installed and started {SERVICE_NAME}.");
+    wait_for(&service, ServiceState::Running)?;
+    println!("{SERVICE_NAME} installed and running.");
+    Ok(())
+}
+
+pub fn start() -> Result<()> {
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
+    let service = manager.open_service(SERVICE_NAME, ServiceAccess::QUERY_STATUS | ServiceAccess::START)?;
+    service.start::<&str>(&[])?;
+    wait_for(&service, ServiceState::Running)
+}
+
+pub fn stop() -> Result<()> {
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
+    let service = manager.open_service(SERVICE_NAME, ServiceAccess::QUERY_STATUS | ServiceAccess::STOP)?;
+    if service.query_status()?.current_state != ServiceState::Stopped {
+        service.stop()?;
+        wait_for(&service, ServiceState::Stopped)?;
+    }
     Ok(())
 }
 
 pub fn uninstall() -> Result<()> {
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
-    let service = manager.open_service(SERVICE_NAME, ServiceAccess::QUERY_STATUS | ServiceAccess::STOP | ServiceAccess::DELETE)?;
+    let service = manager.open_service(
+        SERVICE_NAME,
+        ServiceAccess::QUERY_STATUS | ServiceAccess::STOP | ServiceAccess::DELETE,
+    )?;
     if service.query_status()?.current_state != ServiceState::Stopped {
         let _ = service.stop();
         for _ in 0..20 {

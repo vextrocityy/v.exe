@@ -1,4 +1,4 @@
-import { Activity, AlertOctagon, Ban, Bug, FileWarning, Info, KeyRound, Lock, ScanLine, Settings2 } from "lucide-react";
+import { Activity, AlertOctagon, Ban, Bug, DownloadCloud, FileWarning, Info, KeyRound, Lock, ScanLine, Settings2 } from "lucide-react";
 import type { EventKind, SecurityEvent, Severity } from "../lib/types";
 import { shortPath, timeAgo } from "../lib/format";
 
@@ -12,6 +12,7 @@ const KIND_ICON: Record<EventKind, typeof Info> = {
   scan_finished: ScanLine,
   scan_error: FileWarning,
   settings_changed: Settings2,
+  signatures_updated: DownloadCloud,
   service_info: Activity,
 };
 

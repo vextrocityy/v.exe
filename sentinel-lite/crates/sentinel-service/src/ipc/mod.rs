@@ -1,6 +1,7 @@
 //! IPC server: authenticates clients and maps protocol requests onto the engine.
 
 pub mod auth;
+pub mod client;
 pub mod transport;
 
 use crate::engine::Engine;
@@ -65,13 +66,32 @@ pub async fn serve(engine: Arc<Engine>, token: Arc<AuthToken>, mut shutdown: wat
 async fn handle<S: Stream>(engine: Arc<Engine>, token: Arc<AuthToken>, mut s: S, peer: Peer) -> Result<()> {
     // --- handshake --------------------------------------------------------------
     match tokio::time::timeout(AUTH_TIMEOUT, read_msg(&mut s)).await {
+        Ok(Ok(Request::Auth { token: t, .. })) if token.verify(&t) && !peer.trusted => {
+            tracing::warn!(pid = ?peer.pid, image = ?peer.image, "rejected IPC client outside the install directory");
+            let _ = write_msg(
+                &mut s,
+                &Response::error(ErrorCode::Forbidden, "not a trusted Sentinel-Lite component"),
+            )
+            .await;
+            return Ok(());
+        }
         Ok(Ok(Request::Auth { token: t, client })) if token.verify(&t) => {
-            tracing::debug!(client, pid = ?peer.pid, image = ?peer.image, "client authenticated");
-            write_msg(&mut s, &Response::AuthOk { protocol_version: PROTOCOL_VERSION }).await?;
+            tracing::info!(client, pid = ?peer.pid, image = ?peer.image, elevated = peer.elevated, "client authenticated");
+            write_msg(
+                &mut s,
+                &Response::AuthOk {
+                    protocol_version: PROTOCOL_VERSION,
+                },
+            )
+            .await?;
         }
         _ => {
             tracing::warn!(pid = ?peer.pid, image = ?peer.image, "rejected unauthenticated IPC client");
-            let _ = write_msg(&mut s, &Response::error(ErrorCode::Unauthorized, "authentication required")).await;
+            let _ = write_msg(
+                &mut s,
+                &Response::error(ErrorCode::Unauthorized, "authentication required"),
+            )
+            .await;
             return Ok(());
         }
     }
@@ -90,7 +110,7 @@ async fn handle<S: Stream>(engine: Arc<Engine>, token: Arc<AuthToken>, mut s: S,
             write_msg(&mut s, &Response::Ok).await?;
             return stream_events(engine.subscribe(), s).await;
         }
-        let resp = dispatch(&engine, req).await;
+        let resp = dispatch(&engine, req, &peer).await;
         write_msg(&mut s, &resp).await?;
     }
 }
@@ -112,11 +132,36 @@ async fn stream_events<S: Stream>(mut rx: broadcast::Receiver<sentinel_protocol:
     }
 }
 
-async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Result<T, Response> {
-    tokio::task::spawn_blocking(f).await.map_err(|e| Response::error(ErrorCode::Internal, e.to_string()))
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Result<T, Box<Response>> {
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| Box::new(Response::error(ErrorCode::Internal, e.to_string())))
 }
 
-async fn dispatch(engine: &Arc<Engine>, req: Request) -> Response {
+fn elevation_required(what: &str) -> Response {
+    Response::error(
+        ErrorCode::ElevationRequired,
+        format!("Administrator approval is required because this {what}."),
+    )
+}
+
+async fn dispatch(engine: &Arc<Engine>, req: Request, peer: &Peer) -> Response {
+    // Authorisation: anything that weakens protection needs an elevated client.
+    match &req {
+        Request::RestoreQuarantine { .. } if !peer.elevated => {
+            return elevation_required("releases a detected threat");
+        }
+        Request::UpdateSettings { settings } if !peer.elevated => {
+            let reasons = crate::settings::weakenings(&engine.settings(), &crate::settings::sanitize(settings.clone()));
+            if !reasons.is_empty() {
+                return elevation_required(&format!("change {}", reasons.join(", ")));
+            }
+        }
+        _ => {}
+    }
+    if matches!(req, Request::RestoreQuarantine { .. } | Request::UpdateSettings { .. }) {
+        tracing::info!(pid = ?peer.pid, image = ?peer.image, elevated = peer.elevated, "privileged request: {:?}", std::mem::discriminant(&req));
+    }
     let e = engine.clone();
     let result = match req {
         Request::Auth { .. } => Ok(Response::error(ErrorCode::BadRequest, "already authenticated")),
@@ -126,39 +171,57 @@ async fn dispatch(engine: &Arc<Engine>, req: Request) -> Response {
             Ok(scan_id) => Ok(Response::ScanStarted { scan_id }),
             Err(m) => Ok(Response::error(ErrorCode::Busy, m)),
         },
-        Request::CancelScan => Ok(if e.cancel_scan() { Response::Ok } else { Response::error(ErrorCode::NotFound, "no scan running") }),
+        Request::CancelScan => Ok(if e.cancel_scan() {
+            Response::Ok
+        } else {
+            Response::error(ErrorCode::NotFound, "no scan running")
+        }),
         Request::AcknowledgeThreats => {
             e.acknowledge_threats();
             Ok(Response::Ok)
         }
-        Request::GetEvents { limit, before_id } => blocking(move || match e.db.recent_events(limit, before_id) {
-            Ok(v) => Response::Events(v),
-            Err(err) => Response::error(ErrorCode::Internal, err.to_string()),
-        })
-        .await,
-        Request::ListQuarantine => blocking(move || match e.db.list_quarantine() {
-            Ok(v) => Response::Quarantine(v),
-            Err(err) => Response::error(ErrorCode::Internal, err.to_string()),
-        })
-        .await,
-        Request::RestoreQuarantine { id } => blocking(move || match e.restore_quarantine(&id) {
-            Ok(_) => Response::Ok,
-            Err(err) => Response::error(ErrorCode::NotFound, format!("{err:#}")),
-        })
-        .await,
-        Request::DeleteQuarantine { id } => blocking(move || match e.delete_quarantine(&id) {
+        Request::UpdateSignatures => Ok(match e.start_update() {
             Ok(()) => Response::Ok,
-            Err(err) => Response::error(ErrorCode::NotFound, format!("{err:#}")),
-        })
-        .await,
+            Err(m) => Response::error(ErrorCode::Busy, m),
+        }),
+        Request::GetEvents { limit, before_id } => {
+            blocking(move || match e.db.recent_events(limit, before_id) {
+                Ok(v) => Response::Events(v),
+                Err(err) => Response::error(ErrorCode::Internal, err.to_string()),
+            })
+            .await
+        }
+        Request::ListQuarantine => {
+            blocking(move || match e.db.list_quarantine() {
+                Ok(v) => Response::Quarantine(v),
+                Err(err) => Response::error(ErrorCode::Internal, err.to_string()),
+            })
+            .await
+        }
+        Request::RestoreQuarantine { id } => {
+            blocking(move || match e.restore_quarantine(&id) {
+                Ok(_) => Response::Ok,
+                Err(err) => Response::error(ErrorCode::NotFound, format!("{err:#}")),
+            })
+            .await
+        }
+        Request::DeleteQuarantine { id } => {
+            blocking(move || match e.delete_quarantine(&id) {
+                Ok(()) => Response::Ok,
+                Err(err) => Response::error(ErrorCode::NotFound, format!("{err:#}")),
+            })
+            .await
+        }
         Request::GetSettings => Ok(Response::Settings(e.settings())),
-        Request::UpdateSettings { settings } => blocking(move || match e.update_settings(settings) {
-            Ok(s) => Response::Settings(s),
-            Err(err) => Response::error(ErrorCode::Internal, format!("{err:#}")),
-        })
-        .await,
+        Request::UpdateSettings { settings } => {
+            blocking(move || match e.update_settings(settings) {
+                Ok(s) => Response::Settings(s),
+                Err(err) => Response::error(ErrorCode::Internal, format!("{err:#}")),
+            })
+            .await
+        }
     };
-    result.unwrap_or_else(|r| r)
+    result.unwrap_or_else(|r| *r)
 }
 
 #[cfg(all(test, unix))]
@@ -177,11 +240,37 @@ mod tests {
         serde_json::from_slice(&body).unwrap()
     }
 
+    fn peer(elevated: bool) -> Peer {
+        Peer {
+            trusted: true,
+            elevated,
+            ..Peer::default()
+        }
+    }
+
+    async fn session(engine: &Arc<Engine>, token: &Arc<AuthToken>, p: Peer) -> tokio::io::DuplexStream {
+        let (mut client, server) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(handle(engine.clone(), token.clone(), server, p));
+        let r = roundtrip(
+            &mut client,
+            &Request::Auth {
+                token: "secret".into(),
+                client: "t".into(),
+            },
+        )
+        .await;
+        assert!(matches!(r, Response::AuthOk { .. }), "{r:?}");
+        client
+    }
+
     fn engine() -> (tempfile::TempDir, Arc<Engine>) {
         let dir = tempfile::tempdir().unwrap();
         let paths = AppPaths::new(dir.path().to_path_buf());
         paths.create_all().unwrap();
-        let s = Settings { realtime_protection: false, ..Settings::default() };
+        let s = Settings {
+            realtime_protection: false,
+            ..Settings::default()
+        };
         (dir, Engine::new(paths, Database::open_in_memory().unwrap(), s).unwrap())
     }
 
@@ -191,17 +280,123 @@ mod tests {
         let token = Arc::new(AuthToken::from_string("secret"));
 
         let (mut client, server) = tokio::io::duplex(64 * 1024);
-        tokio::spawn(handle(engine.clone(), token.clone(), server, Peer::default()));
-        let r = roundtrip(&mut client, &Request::Auth { token: "wrong".into(), client: "t".into() }).await;
-        assert!(matches!(r, Response::Error { code: ErrorCode::Unauthorized, .. }));
+        tokio::spawn(handle(engine.clone(), token.clone(), server, peer(false)));
+        let r = roundtrip(
+            &mut client,
+            &Request::Auth {
+                token: "wrong".into(),
+                client: "t".into(),
+            },
+        )
+        .await;
+        assert!(matches!(
+            r,
+            Response::Error {
+                code: ErrorCode::Unauthorized,
+                ..
+            }
+        ));
 
-        let (mut client, server) = tokio::io::duplex(64 * 1024);
-        tokio::spawn(handle(engine, token, server, Peer::default()));
-        let r = roundtrip(&mut client, &Request::Auth { token: "secret".into(), client: "t".into() }).await;
-        assert!(matches!(r, Response::AuthOk { .. }));
+        let mut client = session(&engine, &token, peer(false)).await;
         match roundtrip(&mut client, &Request::GetStatus).await {
             Response::Status(st) => assert!(!st.realtime_enabled),
             other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn untrusted_client_is_forbidden_even_with_token() {
+        let (_dir, engine) = engine();
+        let token = Arc::new(AuthToken::from_string("secret"));
+        let (mut client, server) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(handle(
+            engine,
+            token,
+            server,
+            Peer {
+                trusted: false,
+                elevated: true,
+                ..Peer::default()
+            },
+        ));
+        let r = roundtrip(
+            &mut client,
+            &Request::Auth {
+                token: "secret".into(),
+                client: "t".into(),
+            },
+        )
+        .await;
+        assert!(
+            matches!(
+                r,
+                Response::Error {
+                    code: ErrorCode::Forbidden,
+                    ..
+                }
+            ),
+            "{r:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn weakening_needs_elevation_strengthening_does_not() {
+        let (_dir, engine) = engine();
+        let token = Arc::new(AuthToken::from_string("secret"));
+        let current = engine.settings();
+
+        let mut user = session(&engine, &token, peer(false)).await;
+        let weaker = Settings {
+            exclusions: vec!["/srv/data".into()],
+            ..current.clone()
+        };
+        let r = roundtrip(
+            &mut user,
+            &Request::UpdateSettings {
+                settings: weaker.clone(),
+            },
+        )
+        .await;
+        assert!(
+            matches!(
+                r,
+                Response::Error {
+                    code: ErrorCode::ElevationRequired,
+                    ..
+                }
+            ),
+            "{r:?}"
+        );
+        let r = roundtrip(&mut user, &Request::RestoreQuarantine { id: "x".into() }).await;
+        assert!(
+            matches!(
+                r,
+                Response::Error {
+                    code: ErrorCode::ElevationRequired,
+                    ..
+                }
+            ),
+            "{r:?}"
+        );
+
+        // A neutral / strengthening change is fine for a standard user.
+        let r = roundtrip(
+            &mut user,
+            &Request::UpdateSettings {
+                settings: Settings {
+                    max_file_size_mb: 512,
+                    ..current
+                },
+            },
+        )
+        .await;
+        assert!(matches!(r, Response::Settings(_)), "{r:?}");
+
+        let mut admin = session(&engine, &token, peer(true)).await;
+        let r = roundtrip(&mut admin, &Request::UpdateSettings { settings: weaker }).await;
+        match r {
+            Response::Settings(s) => assert_eq!(s.exclusions, vec!["/srv/data".to_string()]),
+            other => panic!("{other:?}"),
         }
     }
 }

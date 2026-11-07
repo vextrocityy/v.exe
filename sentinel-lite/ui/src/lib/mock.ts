@@ -20,7 +20,15 @@ const settings: Settings = {
   max_scan_threads: 0,
   low_priority_scans: true,
   persistence_poll_secs: 30,
+  auto_update: true,
+  update_interval_hours: 6,
+  community_feeds: true,
+  update_url: null,
+  scheduled_scan: true,
+  scheduled_scan_hours: 24,
 };
+let lastUpdate = now() - 3 * 3600;
+let updating = false;
 
 let quarantine: QuarantineItem[] = [
   {
@@ -68,7 +76,10 @@ function status(): EngineStatus {
     quarantine_count: quarantine.length,
     scan: { ...scan },
     uptime_secs: 7260,
-    memory_bytes: 38 * 1024 * 1024,
+    memory_bytes: 9 * 1024 * 1024,
+    last_signature_update: lastUpdate,
+    signature_update_error: null,
+    update_in_progress: updating,
   };
 }
 
@@ -102,6 +113,14 @@ export const mock = {
         case "start_scan": return startScan(args.kind as ScanKind);
         case "cancel_scan": return scan.running ? finishScan(true) : undefined;
         case "acknowledge_threats": return undefined;
+        case "update_signatures":
+          updating = true;
+          setTimeout(() => {
+            updating = false;
+            lastUpdate = now();
+            push({ kind: "signatures_updated", severity: "info", title: "Signatures updated: 412 new", detail: "MalwareBazaar: 412 hashes", path: null, pid: null });
+          }, 1500);
+          return undefined;
         case "get_events": return events.slice(0, (args.limit as number) ?? 100);
         case "list_quarantine": return quarantine;
         case "restore_quarantine":

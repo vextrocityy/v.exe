@@ -6,7 +6,9 @@ pub mod heuristics;
 pub mod quarantine;
 pub mod realtime;
 pub mod scanner;
+pub mod scheduler;
 pub mod targets;
+pub mod update;
 
 use crate::database::{now_unix, CacheEntry, Database, SignatureHit};
 use crate::settings;
@@ -70,6 +72,8 @@ pub struct Engine {
     shields: RwLock<Vec<ShieldStatus>>,
     /// Detections that were not automatically quarantined.
     unresolved_threats: AtomicU64,
+    update_running: AtomicBool,
+    scheduler: Mutex<Option<(Arc<AtomicBool>, std::thread::JoinHandle<()>)>>,
     started: Instant,
 }
 
@@ -92,6 +96,8 @@ impl Engine {
             realtime: Mutex::new(realtime::RealtimeManager::default()),
             shields: RwLock::new(Vec::new()),
             unresolved_threats: AtomicU64::new(0),
+            update_running: AtomicBool::new(false),
+            scheduler: Mutex::new(None),
             started: Instant::now(),
         }))
     }
@@ -107,24 +113,31 @@ impl Engine {
         let new = settings::sanitize(new);
         settings::save(&self.paths.settings, &new)?;
         *self.settings.write().unwrap_or_else(|e| e.into_inner()) = new.clone();
-        self.emit(EventKind::SettingsChanged, Severity::Info, "Settings updated", None, None, None);
+        self.emit(
+            EventKind::SettingsChanged,
+            Severity::Info,
+            "Settings updated",
+            None,
+            None,
+            None,
+        );
         self.restart_realtime();
         Ok(new)
     }
 
-    /// Exclusions are case-insensitive prefix matches. The engine's own data
+    /// Exclusions are case-insensitive, component-aware prefix matches. The engine's own data
     /// directory (DB, quarantine vault) is always excluded.
     pub fn is_excluded(&self, path: &Path) -> bool {
         if path.starts_with(&self.paths.data) {
             return true;
         }
-        let p = path.to_string_lossy().to_lowercase();
+        let p = path.to_string_lossy();
         self.settings
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .exclusions
             .iter()
-            .any(|ex| !ex.is_empty() && p.starts_with(&ex.to_lowercase()))
+            .any(|ex| crate::util::path_within(&p, ex))
     }
 
     // ----- events ------------------------------------------------------------
@@ -193,7 +206,12 @@ impl Engine {
             Some(h) => h,
             None => {
                 let (h, _) = hasher::sha256_file(path, max)?;
-                let entry = CacheEntry { path: key.into_owned(), size, mtime, sha256: h.clone() };
+                let entry = CacheEntry {
+                    path: key.into_owned(),
+                    size,
+                    mtime,
+                    sha256: h.clone(),
+                };
                 match cache_sink {
                     Some(sink) => sink.push(entry),
                     None => {
@@ -210,9 +228,44 @@ impl Engine {
         Ok(FileVerdict { sha256, size, hit })
     }
 
+    /// Safety gate before killing or quarantining. Hashes from vetted sources
+    /// (bundled / signed official packs) always remediate. Unsigned community
+    /// hashes do not touch Windows system files or validly code-signed binaries,
+    /// so a bad feed entry can never break the OS or a legitimate application.
+    pub fn may_remediate(&self, path: &Path, hit: &SignatureHit) -> Result<(), &'static str> {
+        if !hit.is_community() {
+            return Ok(());
+        }
+        if let Some(root) = std::env::var_os("SystemRoot") {
+            if crate::util::path_within(&path.to_string_lossy(), &root.to_string_lossy()) {
+                return Err("it is a Windows system file");
+            }
+        }
+        if crate::platform::has_valid_signature(path) {
+            return Err("it carries a valid code signature");
+        }
+        Ok(())
+    }
+
     /// React to a signature match: record it and quarantine if configured.
     pub fn handle_detection(&self, path: &Path, verdict: &FileVerdict, pid: Option<u32>, source: &str) {
         let Some(hit) = &verdict.hit else { return };
+        if let Err(reason) = self.may_remediate(path, hit) {
+            self.unresolved_threats.fetch_add(1, Ordering::Relaxed);
+            self.emit(
+                EventKind::ThreatDetected,
+                Severity::Medium,
+                format!("{}: suspicious file left in place", hit.name),
+                Some(format!(
+                    "Found by {source}. It matches a community hash, but {reason}, so it was not quarantined automatically. \
+                     Review it with your security team or submit it to your vendor. SHA-256 {}",
+                    verdict.sha256
+                )),
+                Some(path),
+                pid,
+            );
+            return;
+        }
         self.db.incr_counter("threats_blocked");
         self.emit(
             EventKind::ThreatDetected,
@@ -268,7 +321,14 @@ impl Engine {
 
     pub fn delete_quarantine(&self, id: &str) -> Result<()> {
         self.quarantine.delete(&self.db, id)?;
-        self.emit(EventKind::ServiceInfo, Severity::Info, "Quarantined file permanently deleted", None, None, None);
+        self.emit(
+            EventKind::ServiceInfo,
+            Severity::Info,
+            "Quarantined file permanently deleted",
+            None,
+            None,
+            None,
+        );
         Ok(())
     }
 
@@ -320,6 +380,91 @@ impl Engine {
         &self.scan
     }
 
+    // ----- signature updates -------------------------------------------------------
+
+    pub fn update_running(&self) -> bool {
+        self.update_running.load(Ordering::Acquire)
+    }
+
+    /// Blocking: run all enabled update channels now.
+    pub fn update_signatures(&self) -> Result<usize, String> {
+        if self.update_running.swap(true, Ordering::AcqRel) {
+            return Err("an update is already running".into());
+        }
+        let settings = self.settings();
+        let before = self.db.signature_count();
+        let out = crate::util::contain("signature update", || {
+            update::run(
+                &self.db,
+                &update::Sources::from_settings(&settings),
+                &update::trusted_keys(),
+            )
+        })
+        .unwrap_or_else(|| update::Outcome {
+            errors: vec!["internal error during update".into()],
+            ..Default::default()
+        });
+        self.update_running.store(false, Ordering::Release);
+
+        let now = now_unix();
+        self.db.set_counter("last_update_attempt", now);
+        let succeeded = out.errors.is_empty() || out.imported > 0;
+        if succeeded {
+            self.db.set_counter("last_signature_update", now);
+        }
+        let error = (!out.errors.is_empty()).then(|| out.errors.join("; "));
+        self.db.set_meta("update_error", error.as_deref());
+        let added = self.db.signature_count().saturating_sub(before);
+        self.emit(
+            EventKind::SignaturesUpdated,
+            if succeeded { Severity::Info } else { Severity::Medium },
+            if succeeded {
+                format!("Signatures updated: {added} new")
+            } else {
+                "Signature update failed".to_string()
+            },
+            Some(
+                [out.notes.join("; "), error.clone().unwrap_or_default()]
+                    .join(" ")
+                    .trim()
+                    .to_string(),
+            ),
+            None,
+            None,
+        );
+        match error {
+            Some(e) if !succeeded => Err(e),
+            _ => Ok(added as usize),
+        }
+    }
+
+    /// Non-blocking variant for IPC: runs the update on its own thread.
+    pub fn start_update(self: &Arc<Self>) -> Result<(), String> {
+        if self.update_running() {
+            return Err("an update is already running".into());
+        }
+        let e = self.clone();
+        std::thread::Builder::new()
+            .name("sig-update".into())
+            .spawn(move || {
+                let _ = e.update_signatures();
+            })
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn start_scheduler(self: &Arc<Self>) {
+        let stop = Arc::new(AtomicBool::new(false));
+        let (e, s) = (self.clone(), stop.clone());
+        match std::thread::Builder::new()
+            .name("scheduler".into())
+            .spawn(move || scheduler::run(e, s))
+        {
+            Ok(handle) => *lock(&self.scheduler) = Some((stop, handle)),
+            Err(err) => tracing::error!(error = %err, "could not start scheduler"),
+        }
+    }
+
     // ----- real-time ---------------------------------------------------------------
 
     pub fn start_realtime(self: &Arc<Self>) {
@@ -337,6 +482,10 @@ impl Engine {
     }
 
     pub fn shutdown(&self) {
+        if let Some((stop, handle)) = lock(&self.scheduler).take() {
+            stop.store(true, Ordering::Relaxed);
+            let _ = handle.join();
+        }
         self.cancel_scan();
         self.stop_realtime();
     }
@@ -378,6 +527,9 @@ impl Engine {
             scan: self.scan.snapshot(),
             uptime_secs: self.started.elapsed().as_secs(),
             memory_bytes: crate::platform::working_set_bytes(),
+            last_signature_update: Some(self.db.counter("last_signature_update") as i64).filter(|t| *t > 0),
+            signature_update_error: self.db.meta("update_error"),
+            update_in_progress: self.update_running(),
         }
     }
 }

@@ -18,7 +18,8 @@
         "height": 780,
         "minWidth": 980,
         "minHeight": 640,
-        "backgroundColor": "#020617"
+        "backgroundColor": "#020617",
+        "visible": false
       }
     ],
     "security": {
@@ -27,7 +28,22 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis", "msi"],
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.ico"]
-  }
+    "targets": [
+      "nsis"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ],
+    "publisher": "Sentinel-Lite",
+    "shortDescription": "Lightweight endpoint protection for Windows",
+    "windows": {
+      "nsis": {
+        "installMode": "perMachine"
+      }
+    }
+  },
+  "mainBinaryName": "sentinel-lite"
 }

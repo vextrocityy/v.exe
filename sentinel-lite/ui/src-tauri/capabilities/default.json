@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Main dashboard window: core events only. The app's own commands are the only bridge to the engine.",
+  "description": "Main dashboard window: core events only. The app's own commands are the only bridge to the engine; notifications are raised from Rust, not the webview.",
   "windows": ["main"],
   "permissions": ["core:default"]
 }

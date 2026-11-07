@@ -4,32 +4,38 @@ Phase 1 is a solid, user-mode foundation. It is **not yet** at the level of Defe
 Malwarebytes, and this document is explicit about the gaps so nobody relies on it beyond
 what it does.
 
-## Known limitations (Phase 1)
+## Done in the hardening pass
+
+- [x] Signature updates: Ed25519-signed official packs with rollback protection + MalwareBazaar community feed, every 6 h
+- [x] False-positive safety: community hashes never remediate system or validly code-signed files
+- [x] Elevation (UAC) required for any change that weakens protection, and for quarantine restore
+- [x] IPC clients restricted to the install directory; data directory DACL SYSTEM/Administrators only
+- [x] Scheduled quick scans; per-event panic containment; SCM restart on failure
+- [x] Corrupt-database recovery, schema migrations, rotating logs
+- [x] Installer (NSIS, per-machine) that installs, upgrades and removes the service; tray app with notifications
+- [x] Windows CI: real service install + ETW/File Shield/Process Guard/elevation smoke test + installer install/uninstall
+
+## Known limitations
 
 | Area | Today | Why it matters |
 |---|---|---|
-| Signature coverage | Only the bundled EICAR pack; no update feed | Hash signatures detect nothing until a real feed is wired in (Phase 2). |
 | Pre-execution blocking | Processes are checked *as* they start (ETW), then killed | Malware gets milliseconds of execution. True blocking needs a kernel callback. |
 | File writes | Seen after the fact (`ReadDirectoryChangesW`), no writer PID | Ransomware alerts cannot name or stop the process yet. |
-| Tamper protection | Service can be stopped by an administrator; files are not protected | Malware running as admin can disable it. |
-| IPC authorisation | Any interactive user who can read the token can change settings | Settings changes should require elevation. |
-| Detection breadth | Hashes + a few behavioural rules | No YARA/static analysis, no script (AMSI) inspection, no cloud reputation. |
-| Quarantine vault ACL | Inherits `%ProgramData%` defaults | Should be SYSTEM/Admins only. |
+| Tamper protection | An administrator (or malware running as one) can stop the service | Needs a protected process (ELAM + PPL). |
+| Detection breadth | Hashes + behavioural rules | No YARA/static analysis, no AMSI script inspection, no cloud reputation: novel malware is not detected by signatures. |
+| Official signature content | The channel and signing exist, but there is no threat-research team producing packs | The community feed is the only real-world source out of the box. |
+| Catalog-signed files | Authenticode check reads embedded signatures only | Mitigated by the `%SystemRoot%` rule for community hashes. |
+| Code signing | Not configured (needs your certificate) | See docs/RELEASING.md. |
 
-## Phase 2: hardening (user mode)
+## Phase 2: next user-mode steps
 
-- [ ] **Signature updates**: signed pack downloads (e.g. abuse.ch MalwareBazaar exports),
-      verified with an embedded Ed25519 public key before import.
-- [ ] **YARA scanning** of new executables via `yara-x` (pure Rust), with rule packs signed like signatures.
-- [ ] **AMSI provider** DLL so PowerShell/VBScript/JScript content is inspected *after* de-obfuscation.
-- [ ] **ETW file I/O + network** providers to attribute mass-modification to a PID and suspend it.
-- [ ] **Authenticode** checks (`WinVerifyTrust`): trust signed binaries from known publishers and
-      require the dashboard to be signed by us before the pipe accepts it.
-- [ ] Settings changes that **weaken** protection require an elevated client (check the client token).
-- [ ] Explicit DACLs on `%ProgramData%\SentinelLite` (vault + DB SYSTEM-only, token readable by IU).
+- [ ] **YARA scanning** of new executables via `yara-x`, rule packs signed like signatures.
+- [ ] **AMSI provider** DLL so PowerShell/VBScript/JScript content is inspected after de-obfuscation.
+- [ ] **ETW file I/O + network** providers to attribute mass modification to a PID and suspend it.
+- [ ] Signed allow-list packs (retract false positives centrally).
 - [ ] Canary (decoy) files in Documents for high-confidence ransomware detection.
-- [ ] `RegNotifyChangeKeyValue` instead of polling for Persistence Watch.
-- [ ] Scheduled Tasks and WMI event subscriptions as persistence sources.
+- [ ] `RegNotifyChangeKeyValue` instead of polling; Scheduled Tasks + WMI subscriptions as persistence sources.
+- [ ] Dashboard auto-update (Tauri updater) for the UI and engine.
 
 ## Phase 3: kernel components (needs EV certificate + Microsoft attestation signing)
 

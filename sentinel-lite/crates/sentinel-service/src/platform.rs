@@ -25,13 +25,28 @@ pub fn running_process_images() -> Vec<PathBuf> {
 mod imp {
     use super::ProcessEntry;
     use std::ffi::c_void;
+    use std::os::windows::ffi::OsStrExt;
     use std::os::windows::ffi::OsStringExt;
+    use std::path::Path;
     use std::path::PathBuf;
-    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, HLOCAL, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SetNamedSecurityInfoW, SDDL_REVISION_1, SE_FILE_OBJECT,
+    };
+    use windows_sys::Win32::Security::WinTrust::{
+        WinVerifyTrust, WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA, WINTRUST_FILE_INFO,
+        WTD_CACHE_ONLY_URL_RETRIEVAL, WTD_CHOICE_FILE, WTD_REVOKE_NONE, WTD_STATEACTION_CLOSE, WTD_STATEACTION_VERIFY,
+        WTD_UI_NONE,
+    };
+    use windows_sys::Win32::Security::{
+        GetSecurityDescriptorDacl, GetTokenInformation, TokenElevation, ACL, DACL_SECURITY_INFORMATION,
+        PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, TOKEN_ELEVATION, TOKEN_QUERY,
+    };
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
     };
     use windows_sys::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+    use windows_sys::Win32::System::Threading::OpenProcessToken;
     use windows_sys::Win32::System::Threading::{
         GetCurrentProcess, GetCurrentThread, OpenProcess, QueryFullProcessImageNameW, SetThreadPriority,
         TerminateProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
@@ -63,7 +78,10 @@ mod imp {
             e.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
             if Process32FirstW(snap, &mut e) != 0 {
                 loop {
-                    out.push(ProcessEntry { pid: e.th32ProcessID, ppid: e.th32ParentProcessID });
+                    out.push(ProcessEntry {
+                        pid: e.th32ProcessID,
+                        ppid: e.th32ParentProcessID,
+                    });
                     if Process32NextW(snap, &mut e) == 0 {
                         break;
                     }
@@ -102,14 +120,28 @@ mod imp {
     pub fn command_line(pid: u32) -> Option<String> {
         let h = Handle::open(PROCESS_QUERY_LIMITED_INFORMATION, pid)?;
         let mut needed = 0u32;
-        unsafe { NtQueryInformationProcess(h.0, PROCESS_COMMAND_LINE_INFORMATION, std::ptr::null_mut(), 0, &mut needed) };
+        unsafe {
+            NtQueryInformationProcess(
+                h.0,
+                PROCESS_COMMAND_LINE_INFORMATION,
+                std::ptr::null_mut(),
+                0,
+                &mut needed,
+            )
+        };
         if needed == 0 || needed > 64 * 1024 {
             return None;
         }
         // u64 backing store keeps the UNICODE_STRING header correctly aligned.
         let mut buf = vec![0u64; (needed as usize).div_ceil(8)];
         let status = unsafe {
-            NtQueryInformationProcess(h.0, PROCESS_COMMAND_LINE_INFORMATION, buf.as_mut_ptr().cast(), needed, &mut needed)
+            NtQueryInformationProcess(
+                h.0,
+                PROCESS_COMMAND_LINE_INFORMATION,
+                buf.as_mut_ptr().cast(),
+                needed,
+                &mut needed,
+            )
         };
         if status < 0 {
             return None;
@@ -137,6 +169,110 @@ mod imp {
         }
     }
 
+    fn wide(p: &Path) -> Vec<u16> {
+        p.as_os_str().encode_wide().chain(Some(0)).collect()
+    }
+
+    /// Embedded Authenticode signature that chains to a trusted root.
+    /// Revocation is not checked online (fast, works offline). Catalog-signed
+    /// system files report false here; callers treat %SystemRoot% separately.
+    pub fn has_valid_signature(path: &Path) -> bool {
+        let file = wide(path);
+        unsafe {
+            let mut info: WINTRUST_FILE_INFO = std::mem::zeroed();
+            info.cbStruct = std::mem::size_of::<WINTRUST_FILE_INFO>() as u32;
+            info.pcwszFilePath = file.as_ptr();
+            let mut data: WINTRUST_DATA = std::mem::zeroed();
+            data.cbStruct = std::mem::size_of::<WINTRUST_DATA>() as u32;
+            data.dwUIChoice = WTD_UI_NONE;
+            data.fdwRevocationChecks = WTD_REVOKE_NONE;
+            data.dwUnionChoice = WTD_CHOICE_FILE;
+            data.Anonymous.pFile = &mut info;
+            data.dwStateAction = WTD_STATEACTION_VERIFY;
+            data.dwProvFlags = WTD_CACHE_ONLY_URL_RETRIEVAL;
+            let mut action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+            let status = WinVerifyTrust(std::ptr::null_mut(), &mut action, &mut data as *mut _ as *mut c_void);
+            data.dwStateAction = WTD_STATEACTION_CLOSE;
+            WinVerifyTrust(std::ptr::null_mut(), &mut action, &mut data as *mut _ as *mut c_void);
+            status == 0
+        }
+    }
+
+    /// Is `pid` running with an elevated (administrator) or SYSTEM token?
+    pub fn is_process_elevated(pid: u32) -> bool {
+        let Some(h) = Handle::open(PROCESS_QUERY_LIMITED_INFORMATION, pid) else {
+            return false;
+        };
+        unsafe {
+            let mut token: HANDLE = std::ptr::null_mut();
+            if OpenProcessToken(h.0, TOKEN_QUERY, &mut token) == 0 {
+                return false;
+            }
+            let token = Handle(token);
+            let mut elevation: TOKEN_ELEVATION = std::mem::zeroed();
+            let mut len = 0u32;
+            let ok = GetTokenInformation(
+                token.0,
+                TokenElevation,
+                &mut elevation as *mut _ as *mut c_void,
+                std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+                &mut len,
+            );
+            ok != 0 && elevation.TokenIsElevated != 0
+        }
+    }
+
+    /// Replace the DACL on `path` with the one described by `sddl` (protected:
+    /// no inheritance from the parent; inheritable ACEs flow to children).
+    pub fn set_dacl(path: &Path, sddl: &str) -> std::io::Result<()> {
+        let sddl_w: Vec<u16> = sddl.encode_utf16().chain(Some(0)).collect();
+        let target = wide(path);
+        unsafe {
+            let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+            if ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl_w.as_ptr(),
+                SDDL_REVISION_1,
+                &mut sd,
+                std::ptr::null_mut(),
+            ) == 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            let (mut present, mut defaulted) = (0i32, 0i32);
+            let mut dacl: *mut ACL = std::ptr::null_mut();
+            let got = GetSecurityDescriptorDacl(sd, &mut present, &mut dacl, &mut defaulted);
+            let rc = if got != 0 && present != 0 {
+                SetNamedSecurityInfoW(
+                    target.as_ptr(),
+                    SE_FILE_OBJECT,
+                    DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    dacl,
+                    std::ptr::null_mut(),
+                )
+            } else {
+                1 // ERROR_INVALID_FUNCTION
+            };
+            LocalFree(sd as HLOCAL);
+            if rc == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::from_raw_os_error(rc as i32))
+            }
+        }
+    }
+
+    /// Data directory (DB, quarantine vault, logs): SYSTEM + Administrators only.
+    pub fn harden_data_dir(dir: &Path) -> std::io::Result<()> {
+        set_dacl(dir, "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)")
+    }
+
+    /// IPC token: additionally readable by interactive users so the dashboard can connect.
+    pub fn harden_token_file(path: &Path) -> std::io::Result<()> {
+        set_dacl(path, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;IU)")
+    }
+
     /// Background mode lowers CPU *and* I/O priority for the current thread,
     /// so scans yield to the user's foreground work.
     pub struct BackgroundPriority(bool);
@@ -155,6 +291,36 @@ mod imp {
     }
 }
 
+/// Is `client` a trusted Sentinel-Lite component? When the service runs from a
+/// protected install location (Program Files, writable only by administrators),
+/// clients must be executables from that same directory. Dev builds running from
+/// anywhere else skip the check (and log that they do).
+pub fn is_trusted_client(client_image: Option<&std::path::Path>) -> bool {
+    let Some(install_dir) = install_dir().filter(|d| is_protected_dir(d)) else {
+        return true;
+    };
+    client_image
+        .and_then(|p| p.parent())
+        .is_some_and(|d| d.to_string_lossy().eq_ignore_ascii_case(&install_dir.to_string_lossy()))
+}
+
+/// Directory containing the service executable.
+pub fn install_dir() -> Option<PathBuf> {
+    std::env::current_exe().ok()?.parent().map(|p| p.to_path_buf())
+}
+
+/// Under Program Files (Windows). Never true elsewhere.
+pub fn is_protected_dir(dir: &std::path::Path) -> bool {
+    if !cfg!(windows) {
+        return false;
+    }
+    let d = dir.to_string_lossy();
+    ["ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"]
+        .iter()
+        .filter_map(|v| std::env::var(v).ok())
+        .any(|pf| crate::util::path_within(&d, &pf))
+}
+
 // ===========================================================================
 #[cfg(not(windows))]
 mod imp {
@@ -162,7 +328,9 @@ mod imp {
     use std::path::PathBuf;
 
     pub fn list_processes() -> Vec<ProcessEntry> {
-        let Ok(dir) = std::fs::read_dir("/proc") else { return Vec::new() };
+        let Ok(dir) = std::fs::read_dir("/proc") else {
+            return Vec::new();
+        };
         dir.flatten()
             .filter_map(|e| e.file_name().to_str()?.parse::<u32>().ok())
             .filter_map(|pid| {
@@ -185,13 +353,41 @@ mod imp {
     }
 
     pub fn terminate(pid: u32) -> bool {
-        std::process::Command::new("kill").args(["-9", &pid.to_string()]).status().map(|s| s.success()).unwrap_or(false)
+        std::process::Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
     }
 
     pub fn working_set_bytes() -> Option<u64> {
         let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
         let pages: u64 = statm.split_whitespace().nth(1)?.parse().ok()?;
         Some(pages * 4096)
+    }
+
+    pub fn has_valid_signature(_path: &std::path::Path) -> bool {
+        false
+    }
+
+    /// Dev hosts: root, or the same user the service runs as.
+    pub fn is_process_elevated(pid: u32) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        let uid_of = |p: &str| std::fs::metadata(p).map(|m| m.uid()).ok();
+        match (uid_of(&format!("/proc/{pid}")), uid_of("/proc/self")) {
+            (Some(client), Some(me)) => client == 0 || client == me,
+            _ => false,
+        }
+    }
+
+    pub fn harden_data_dir(dir: &std::path::Path) -> std::io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+    }
+
+    pub fn harden_token_file(path: &std::path::Path) -> std::io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
     }
 
     pub struct BackgroundPriority;

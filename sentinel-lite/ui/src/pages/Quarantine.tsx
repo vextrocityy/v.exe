@@ -80,7 +80,7 @@ export function QuarantinePage({ onChanged }: { onChanged: () => void }) {
             <h3 className="text-lg font-semibold text-slate-100">{confirm.action === "restore" ? "Restore this file?" : "Delete permanently?"}</h3>
             <p className="mt-2 text-sm text-slate-400">
               {confirm.action === "restore"
-                ? `"${confirm.item.threat_name}" will be returned to its original location and its hash allow-listed, so Sentinel-Lite will stop blocking it. Only do this if you are sure it is a false positive.`
+                ? `"${confirm.item.threat_name}" will be returned to its original location and its hash allow-listed, so Sentinel-Lite will stop blocking it. Windows will ask for administrator approval. Only do this if you are sure it is a false positive.`
                 : `"${confirm.item.threat_name}" will be destroyed. This cannot be undone.`}
             </p>
             <div className="mt-6 flex justify-end gap-2">

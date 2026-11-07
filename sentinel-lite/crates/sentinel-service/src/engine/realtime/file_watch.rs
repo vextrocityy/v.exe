@@ -80,11 +80,14 @@ pub fn start(engine: Arc<Engine>) -> Result<ShieldHandle, String> {
                     Err(RecvTimeoutError::Disconnected) => break,
                 }
                 let now = Instant::now();
-                let ready: Vec<PathBuf> =
-                    pending.iter().filter(|(_, t)| now.duration_since(**t) >= SETTLE).map(|(p, _)| p.clone()).collect();
+                let ready: Vec<PathBuf> = pending
+                    .iter()
+                    .filter(|(_, t)| now.duration_since(**t) >= SETTLE)
+                    .map(|(p, _)| p.clone())
+                    .collect();
                 for p in ready {
                     pending.remove(&p);
-                    scan_one(&engine, &p);
+                    crate::util::contain("file shield scan", || scan_one(&engine, &p));
                 }
             }
         })
@@ -113,14 +116,21 @@ fn classify(ev: &notify::Event, rename_from: &mut Option<PathBuf>) -> Vec<(PathB
         }
         NEvent::Modify(ModifyKind::Name(RenameMode::To)) => {
             let from = rename_from.take();
-            ev.paths.iter().map(|to| (to.clone(), Some(rename_activity(from.as_deref(), to)))).collect()
+            ev.paths
+                .iter()
+                .map(|to| (to.clone(), Some(rename_activity(from.as_deref(), to))))
+                .collect()
         }
         NEvent::Modify(ModifyKind::Name(RenameMode::Both)) if ev.paths.len() == 2 => {
             let act = rename_activity(Some(&ev.paths[0]), &ev.paths[1]);
             vec![(ev.paths[1].clone(), Some(act))]
         }
         NEvent::Modify(ModifyKind::Name(_)) => Vec::new(),
-        NEvent::Modify(_) => ev.paths.iter().map(|p| (p.clone(), Some(FileActivity::Modified))).collect(),
+        NEvent::Modify(_) => ev
+            .paths
+            .iter()
+            .map(|p| (p.clone(), Some(FileActivity::Modified)))
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -168,9 +178,11 @@ mod tests {
     #[test]
     fn classify_rename_pairs() {
         let mut from = None;
-        let ev = notify::Event::new(NEvent::Modify(ModifyKind::Name(RenameMode::From))).add_path("C:\\a\\x.docx".into());
+        let ev =
+            notify::Event::new(NEvent::Modify(ModifyKind::Name(RenameMode::From))).add_path("C:\\a\\x.docx".into());
         assert!(classify(&ev, &mut from).is_empty());
-        let ev = notify::Event::new(NEvent::Modify(ModifyKind::Name(RenameMode::To))).add_path("C:\\a\\x.docx.enc".into());
+        let ev =
+            notify::Event::new(NEvent::Modify(ModifyKind::Name(RenameMode::To))).add_path("C:\\a\\x.docx.enc".into());
         let out = classify(&ev, &mut from);
         assert_eq!(out[0].1, Some(FileActivity::RenamedNewExtension));
     }

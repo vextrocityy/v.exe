@@ -63,7 +63,12 @@ impl RealtimeManager {
 
         let mut statuses = Vec::new();
         for (name, enabled, start) in plan {
-            let mut status = ShieldStatus { name: name.into(), enabled, running: false, detail: None };
+            let mut status = ShieldStatus {
+                name: name.into(),
+                enabled,
+                running: false,
+                detail: None,
+            };
             if enabled {
                 match start(engine.clone()) {
                     Ok(h) => {
@@ -81,7 +86,10 @@ impl RealtimeManager {
         }
 
         // The behaviour engine piggybacks on the process + file event streams.
-        let feeds = statuses.iter().filter(|st| st.running && st.name != PERSISTENCE_WATCH).count();
+        let feeds = statuses
+            .iter()
+            .filter(|st| st.running && st.name != PERSISTENCE_WATCH)
+            .count();
         statuses.push(ShieldStatus {
             name: BEHAVIOR_ENGINE.into(),
             enabled: on && s.behavior_monitor,

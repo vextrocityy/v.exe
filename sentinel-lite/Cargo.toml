@@ -26,5 +26,5 @@ tokio = { version = "1", default-features = false }
 opt-level = 3
 lto = "thin"
 codegen-units = 1
-panic = "abort"   # smaller binary; the service supervisor restarts us on crash
+panic = "unwind"  # a bug in one shield is contained (catch_unwind), not fatal to the service
 strip = true

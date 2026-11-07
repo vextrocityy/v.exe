@@ -55,7 +55,13 @@ pub fn start(engine: Arc<Engine>) -> Result<ShieldHandle, String> {
             .map_err(|e| e.to_string())?,
     );
 
-    Ok(ShieldHandle { name: PROCESS_GUARD, stop, threads, on_stop, detail: Some(detail) })
+    Ok(ShieldHandle {
+        name: PROCESS_GUARD,
+        stop,
+        threads,
+        on_stop,
+        detail: Some(detail),
+    })
 }
 
 /// Fallback source: diff the process list once per second.
@@ -65,7 +71,10 @@ fn poll_source(tx: SyncSender<ProcessStart>, stop: Arc<AtomicBool>) {
         let now = platform::list_processes();
         for p in &now {
             if !known.contains(&p.pid) {
-                let _ = tx.try_send(ProcessStart { pid: p.pid, ppid: p.ppid });
+                let _ = tx.try_send(ProcessStart {
+                    pid: p.pid,
+                    ppid: p.ppid,
+                });
             }
         }
         known = now.into_iter().map(|p| p.pid).collect();
@@ -91,22 +100,32 @@ fn analyzer(engine: Arc<Engine>, rx: Receiver<ProcessStart>, stop: Arc<AtomicBoo
             let live: HashSet<u32> = platform::list_processes().into_iter().map(|p| p.pid).collect();
             images.retain(|pid, _| live.contains(pid));
         }
-        let Some(image) = platform::image_path(ev.pid) else { continue }; // already exited
-        images.insert(ev.pid, image.clone());
-        if engine.is_excluded(&image) {
-            continue;
-        }
-        let settings = engine.settings();
+        crate::util::contain("process event", || handle_start(&engine, &mut images, &ev));
+    }
+}
 
-        // 1) Signature check of the executable.
-        match engine.check_file(&image, None) {
-            Ok(verdict) if verdict.hit.is_some() => {
-                let name = verdict.hit.as_ref().map(|h| h.name.clone()).unwrap_or_default();
-                if settings.auto_kill_malicious && platform::terminate(ev.pid) {
+fn handle_start(engine: &Engine, images: &mut HashMap<u32, PathBuf>, ev: &ProcessStart) {
+    let Some(image) = platform::image_path(ev.pid) else {
+        return;
+    }; // already exited
+    images.insert(ev.pid, image.clone());
+    if engine.is_excluded(&image) {
+        return;
+    }
+    let settings = engine.settings();
+
+    // 1) Signature check of the executable.
+    match engine.check_file(&image, None) {
+        Ok(verdict) => {
+            if let Some(hit) = &verdict.hit {
+                if settings.auto_kill_malicious
+                    && engine.may_remediate(&image, hit).is_ok()
+                    && platform::terminate(ev.pid)
+                {
                     engine.emit(
                         EventKind::ProcessBlocked,
                         Severity::Critical,
-                        format!("Terminated malicious process ({name})"),
+                        format!("Terminated malicious process ({})", hit.name),
                         None,
                         Some(&image),
                         Some(ev.pid),
@@ -115,32 +134,35 @@ fn analyzer(engine: Arc<Engine>, rx: Receiver<ProcessStart>, stop: Arc<AtomicBoo
                     std::thread::sleep(Duration::from_millis(300));
                 }
                 engine.handle_detection(&image, &verdict, Some(ev.pid), "Process Guard");
-                continue;
+                return;
             }
-            Ok(_) => {}
-            Err(reason) => tracing::debug!(image = %image.display(), ?reason, "could not hash process image"),
         }
+        Err(reason) => tracing::debug!(image = %image.display(), ?reason, "could not hash process image"),
+    }
 
-        // 2) Behavioural assessment (alert only).
-        if settings.behavior_monitor {
-            let cmd = platform::command_line(ev.pid);
-            let parent = images.get(&ev.ppid).cloned().or_else(|| platform::image_path(ev.ppid));
-            let a = heuristics::assess_process(&ProcessContext {
-                image: &image,
-                command_line: cmd.as_deref(),
-                parent_image: parent.as_deref(),
-            });
-            if a.score >= heuristics::ALERT_MEDIUM {
-                let sev = if a.score >= heuristics::ALERT_HIGH { Severity::High } else { Severity::Medium };
-                engine.emit(
-                    EventKind::BehaviorAlert,
-                    sev,
-                    "Suspicious process behaviour",
-                    Some(format!("score {}: {}", a.score, a.reasons.join("; "))),
-                    Some(&image),
-                    Some(ev.pid),
-                );
-            }
+    // 2) Behavioural assessment (alert only).
+    if settings.behavior_monitor {
+        let cmd = platform::command_line(ev.pid);
+        let parent = images.get(&ev.ppid).cloned().or_else(|| platform::image_path(ev.ppid));
+        let a = heuristics::assess_process(&ProcessContext {
+            image: &image,
+            command_line: cmd.as_deref(),
+            parent_image: parent.as_deref(),
+        });
+        if a.score >= heuristics::ALERT_MEDIUM {
+            let sev = if a.score >= heuristics::ALERT_HIGH {
+                Severity::High
+            } else {
+                Severity::Medium
+            };
+            engine.emit(
+                EventKind::BehaviorAlert,
+                sev,
+                "Suspicious process behaviour",
+                Some(format!("score {}: {}", a.score, a.reasons.join("; "))),
+                Some(&image),
+                Some(ev.pid),
+            );
         }
     }
 }
@@ -169,7 +191,9 @@ mod etw {
             if record.event_id() != EVENT_PROCESS_START {
                 return;
             }
-            let Ok(schema) = locator.event_schema(record) else { return };
+            let Ok(schema) = locator.event_schema(record) else {
+                return;
+            };
             let parser = Parser::create(record, &schema);
             let pid: Option<u32> = parser.try_parse("ProcessID").ok();
             let ppid: u32 = parser.try_parse("ParentProcessID").unwrap_or(0);

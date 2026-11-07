@@ -5,11 +5,27 @@ use tokio::io::{AsyncRead, AsyncWrite};
 pub trait Stream: AsyncRead + AsyncWrite + Unpin + Send + 'static {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> Stream for T {}
 
-/// Who connected (for the audit log).
+/// Who connected, and what they may do.
 #[derive(Debug, Default, Clone)]
 pub struct Peer {
     pub pid: Option<u32>,
     pub image: Option<String>,
+    /// Running elevated (administrator) or as SYSTEM: may weaken protection.
+    pub elevated: bool,
+    /// A Sentinel-Lite executable from the protected install directory.
+    pub trusted: bool,
+}
+
+impl Peer {
+    pub fn from_pid(pid: Option<u32>) -> Self {
+        let image = pid.and_then(crate::platform::image_path);
+        Self {
+            pid,
+            trusted: crate::platform::is_trusted_client(image.as_deref()),
+            elevated: pid.is_some_and(crate::platform::is_process_elevated),
+            image: image.map(|p| p.display().to_string()),
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -47,7 +63,12 @@ mod win {
             let wide: Vec<u16> = sddl.encode_utf16().chain(Some(0)).collect();
             let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
             let ok = unsafe {
-                ConvertStringSecurityDescriptorToSecurityDescriptorW(wide.as_ptr(), SDDL_REVISION_1, &mut sd, std::ptr::null_mut())
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    wide.as_ptr(),
+                    SDDL_REVISION_1,
+                    &mut sd,
+                    std::ptr::null_mut(),
+                )
             };
             if ok == 0 {
                 return Err(io::Error::last_os_error());
@@ -95,15 +116,8 @@ mod win {
             // always a listening instance.
             let connected = std::mem::replace(&mut self.next, create(false)?);
             let mut pid = 0u32;
-            let peer = if unsafe { GetNamedPipeClientProcessId(connected.as_raw_handle() as _, &mut pid) } != 0 {
-                Peer {
-                    pid: Some(pid),
-                    image: crate::platform::image_path(pid).map(|p| p.display().to_string()),
-                }
-            } else {
-                Peer::default()
-            };
-            Ok((connected, peer))
+            let ok = unsafe { GetNamedPipeClientProcessId(connected.as_raw_handle() as _, &mut pid) } != 0;
+            Ok((connected, Peer::from_pid(ok.then_some(pid))))
         }
     }
 }
@@ -134,8 +148,7 @@ mod unix {
         pub async fn accept(&mut self) -> io::Result<(UnixStream, Peer)> {
             let (s, _) = self.inner.accept().await?;
             let pid = s.peer_cred().ok().and_then(|c| c.pid()).map(|p| p as u32);
-            Ok((s, Peer { pid, image: None }))
+            Ok((s, Peer::from_pid(pid)))
         }
     }
 }
-

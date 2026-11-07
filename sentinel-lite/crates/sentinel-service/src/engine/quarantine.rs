@@ -44,7 +44,10 @@ fn random_bytes<const N: usize>() -> [u8; N] {
     // getrandom only fails if the OS RNG is unavailable; fall back to time-based
     // bytes so quarantine still works (the key is obfuscation, not secrecy).
     if getrandom::fill(&mut b).is_err() {
-        let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+        let t = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
         for (i, x) in b.iter_mut().enumerate() {
             *x = (t >> ((i % 16) * 8)) as u8;
         }
@@ -189,7 +192,10 @@ mod tests {
         let item = q.isolate(&db, &victim, &"b".repeat(64), "Test.Threat").unwrap();
         assert!(!victim.exists());
         let stored = fs::read(q.vault_path(&item.id)).unwrap();
-        assert!(!stored.windows(2).any(|w| w == b"MZ"), "payload must not be stored in clear");
+        assert!(
+            !stored.windows(2).any(|w| w == b"MZ"),
+            "payload must not be stored in clear"
+        );
         assert_eq!(db.list_quarantine().unwrap().len(), 1);
 
         let back = q.restore(&db, &item.id).unwrap();

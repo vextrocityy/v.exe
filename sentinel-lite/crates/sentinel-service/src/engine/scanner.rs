@@ -152,7 +152,8 @@ fn worker(engine: &Engine, rx: &Mutex<Receiver<PathBuf>>, cancel: &AtomicBool, l
         if n % 64 == 1 {
             state.set_current(&path);
         }
-        match engine.check_file(&path, Some(&mut cache)) {
+        let outcome = crate::util::contain("scan file", || engine.check_file(&path, Some(&mut cache)));
+        match outcome.unwrap_or(Err(SkipReason::Other)) {
             Ok(verdict) => {
                 state.files.fetch_add(1, Ordering::Relaxed);
                 state.bytes.fetch_add(verdict.size, Ordering::Relaxed);
@@ -213,7 +214,11 @@ pub fn run(engine: Arc<Engine>, id: u64, kind: ScanKind, mut roots: Vec<PathBuf>
     let cancelled = cancel.load(Ordering::Relaxed);
     engine.emit(
         EventKind::ScanFinished,
-        if snap.threats_found > 0 { Severity::High } else { Severity::Info },
+        if snap.threats_found > 0 {
+            Severity::High
+        } else {
+            Severity::Info
+        },
         format!(
             "{kind:?} scan {}: {} threat(s)",
             if cancelled { "cancelled" } else { "complete" },

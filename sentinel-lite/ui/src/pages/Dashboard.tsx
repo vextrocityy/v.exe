@@ -1,14 +1,36 @@
-import { Cpu, Database, Lock, ShieldOff } from "lucide-react";
+import { useState } from "react";
+import { Cpu, Database, Lock, RefreshCw, ShieldOff } from "lucide-react";
 import { ActivityLog } from "../components/ActivityLog";
 import { Panel } from "../components/Panel";
 import { ScanPanel } from "../components/ScanPanel";
 import { ShieldHero } from "../components/ShieldHero";
 import { StatCard } from "../components/StatCard";
 import { api } from "../lib/api";
-import { formatBytes, formatNumber, formatUptime } from "../lib/format";
+import { formatBytes, formatNumber, formatUptime, timeAgo } from "../lib/format";
 import type { EngineStatus, SecurityEvent } from "../lib/types";
 
+function signatureHint(status: EngineStatus | null): { text: string; warn: boolean } {
+  if (!status) return { text: "Local database", warn: false };
+  if (status.update_in_progress) return { text: "Updating…", warn: false };
+  if (status.signature_update_error && !status.last_signature_update) return { text: "Update failed: " + status.signature_update_error, warn: true };
+  if (!status.last_signature_update) return { text: "Never updated", warn: true };
+  const stale = Date.now() / 1000 - status.last_signature_update > 3 * 86400;
+  return { text: `Updated ${timeAgo(status.last_signature_update)}`, warn: stale };
+}
+
 export function Dashboard({ status, events, refresh, onSeeAll }: { status: EngineStatus | null; events: SecurityEvent[]; refresh: () => Promise<void>; onSeeAll: () => void }) {
+  const [updateError, setUpdateError] = useState<string | null>(null);
+  const sig = signatureHint(status);
+  const updating = !!status?.update_in_progress;
+  const runUpdate = async () => {
+    setUpdateError(null);
+    try {
+      await api.updateSignatures();
+      await refresh();
+    } catch (e) {
+      setUpdateError(String(e));
+    }
+  };
   return (
     <div className="space-y-6">
       <div className="grid grid-cols-[1fr_340px] gap-6">
@@ -27,7 +49,19 @@ export function Dashboard({ status, events, refresh, onSeeAll }: { status: Engin
       <div className="grid grid-cols-4 gap-4">
         <StatCard icon={ShieldOff} accent="rose" label="Threats blocked" value={formatNumber(status?.threats_blocked_total ?? 0)} hint="All time" />
         <StatCard icon={Lock} accent="violet" label="Quarantined" value={formatNumber(status?.quarantine_count ?? 0)} hint="Isolated files" />
-        <StatCard icon={Database} accent="cyan" label="Signatures" value={formatNumber(status?.signature_count ?? 0)} hint="Local database" />
+        <StatCard
+          icon={Database}
+          accent="cyan"
+          label="Signatures"
+          value={formatNumber(status?.signature_count ?? 0)}
+          hint={updateError ?? sig.text}
+          hintTone={updateError || sig.warn ? "warn" : undefined}
+          action={
+            <button onClick={runUpdate} disabled={updating || !status} title="Check for signature updates now" aria-label="Update signatures" className="rounded-md p-1 text-slate-400 hover:bg-slate-800 hover:text-cyan-300 disabled:opacity-40">
+              <RefreshCw className={`h-4 w-4 ${updating ? "animate-spin" : ""}`} />
+            </button>
+          }
+        />
         <StatCard icon={Cpu} accent="emerald" label="Engine memory" value={formatBytes(status?.memory_bytes)} hint={status ? `Up ${formatUptime(status.uptime_secs)}` : undefined} />
       </div>
 

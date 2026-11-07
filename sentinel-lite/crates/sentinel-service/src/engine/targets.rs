@@ -15,7 +15,9 @@ pub fn user_profiles() -> Vec<PathBuf> {
     #[cfg(not(windows))]
     let root = PathBuf::from(if cfg!(target_os = "macos") { "/Users" } else { "/home" });
 
-    let Ok(entries) = std::fs::read_dir(&root) else { return Vec::new() };
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return Vec::new();
+    };
     entries
         .flatten()
         .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))

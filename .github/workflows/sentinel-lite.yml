@@ -5,6 +5,7 @@ on:
     paths: ["sentinel-lite/**", ".github/workflows/sentinel-lite.yml"]
   pull_request:
     paths: ["sentinel-lite/**", ".github/workflows/sentinel-lite.yml"]
+  workflow_dispatch:
 
 defaults:
   run:
@@ -12,6 +13,7 @@ defaults:
 
 jobs:
   engine:
+    name: Engine (test + Windows smoke test)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -21,22 +23,66 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: sentinel-lite
-      - run: cargo clippy -p sentinel-service -p sentinel-protocol --all-targets -- -D warnings
-      - run: cargo test -p sentinel-service -p sentinel-protocol
-      - run: cargo build --release -p sentinel-service
+      - run: cargo clippy --locked -p sentinel-service -p sentinel-protocol --all-targets -- -D warnings
+      - run: cargo test --locked -p sentinel-service -p sentinel-protocol
+      - run: cargo build --locked --release -p sentinel-service
+      - name: End-to-end smoke test (installs the real service)
+        shell: pwsh
+        run: ./scripts/smoke-test.ps1
       - uses: actions/upload-artifact@v4
         with:
           name: sentinel-service
           path: sentinel-lite/target/release/sentinel-service.exe
 
-  ui:
+  installer:
+    name: Installer (build + silent install/uninstall)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: sentinel-lite
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: npm ci
+      - name: Typecheck dashboard
         working-directory: sentinel-lite/ui
-      - run: npm run build
-        working-directory: sentinel-lite/ui
+        run: npm ci && npm run typecheck
+      - name: Build installer
+        shell: pwsh
+        env:
+          SENTINEL_UPDATE_PUBKEYS: ${{ vars.SENTINEL_UPDATE_PUBKEYS }}
+        run: ./scripts/build-release.ps1
+      - name: Clippy (dashboard backend)
+        run: cargo clippy --locked -p sentinel-ui -- -D warnings
+      - name: Silent install, verify, uninstall
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          Start-Process $installer.FullName -ArgumentList "/S" -Wait
+          $dir = "C:\Program Files\Sentinel-Lite"
+          foreach ($f in "sentinel-lite.exe", "sentinel-service.exe", "signatures\core.json") {
+            if (-not (Test-Path "$dir\$f")) { throw "missing $f" }
+          }
+          $svc = Get-Service SentinelLite
+          if ($svc.Status -ne "Running") { throw "service not running: $($svc.Status)" }
+          $status = (& "$dir\sentinel-service.exe" status | Out-String | ConvertFrom-Json).data
+          "State: $($status.state | ConvertTo-Json -Compress)  signatures: $($status.signature_count)"
+          if ($status.signature_count -lt 2) { throw "bundled signatures not loaded" }
+          # A client outside the install directory must be refused.
+          $rogue = Join-Path $env:TEMP "rogue-client.exe"
+          Copy-Item "$dir\sentinel-service.exe" $rogue
+          & $rogue status 2>&1 | Out-String | Tee-Object -Variable out
+          if ($LASTEXITCODE -eq 0) { throw "untrusted client was allowed to connect" }
+          if (-not (Get-ItemProperty "HKLM:\Software\Microsoft\Windows\CurrentVersion\Run")."Sentinel-Lite") { throw "autostart entry missing" }
+          Start-Process "$dir\uninstall.exe" -ArgumentList "/S" -Wait
+          Start-Sleep 10
+          if (Get-Service SentinelLite -ErrorAction SilentlyContinue) { throw "service still registered after uninstall" }
+          "Install / verify / uninstall OK"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sentinel-lite-installer
+          path: sentinel-lite/target/release/bundle/nsis/*-setup.exe

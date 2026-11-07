@@ -36,9 +36,29 @@ fn run(engine: Arc<Engine>, stop: Arc<AtomicBool>, interval: Duration) {
     let mut baseline = engine.db.persistence_baseline().unwrap_or_default();
     let mut first_run = baseline.is_empty();
     loop {
+        crate::util::contain("persistence poll", || poll(&engine, &mut baseline, &mut first_run));
+        if sleep_or_stop(&stop, interval) {
+            break;
+        }
+    }
+}
+
+/// Our own installer's autostart entries are expected, not suspicious.
+fn is_own_entry(value: &str) -> bool {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_string_lossy().to_lowercase()))
+        .is_some_and(|dir| dir.len() > 3 && value.to_lowercase().contains(&dir))
+}
+
+fn poll(engine: &Engine, baseline: &mut HashMap<String, String>, first_run: &mut bool) {
+    {
         let current = collect();
-        if !first_run {
+        if !*first_run {
             for (key, value) in &current {
+                if is_own_entry(value) || is_own_entry(key) {
+                    continue;
+                }
                 let change = match baseline.get(key) {
                     None => "New autostart entry",
                     Some(old) if old != value => "Autostart entry modified",
@@ -61,16 +81,13 @@ fn run(engine: Arc<Engine>, stop: Arc<AtomicBool>, interval: Duration) {
                 }
             }
         }
-        if current != baseline {
+        if current != *baseline {
             if let Err(e) = engine.db.replace_persistence_baseline(&current) {
                 tracing::warn!(error = %e, "could not store persistence baseline");
             }
-            baseline = current;
+            *baseline = current;
         }
-        first_run = false;
-        if sleep_or_stop(&stop, interval) {
-            break;
-        }
+        *first_run = false;
     }
 }
 
@@ -159,8 +176,15 @@ fn collect() -> HashMap<String, String> {
             if !meta.is_file() || e.file_name().eq_ignore_ascii_case("desktop.ini") {
                 continue;
             }
-            let mtime = meta.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs());
-            map.insert(format!("STARTUP|{}", e.path().display()), format!("size={} mtime={:?}", meta.len(), mtime));
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_secs());
+            map.insert(
+                format!("STARTUP|{}", e.path().display()),
+                format!("size={} mtime={:?}", meta.len(), mtime),
+            );
         }
     }
     #[cfg(windows)]
@@ -182,7 +206,9 @@ mod registry {
     ];
 
     fn values(root: &RegKey, root_name: &str, sub: &str, map: &mut HashMap<String, String>) {
-        let Ok(key) = root.open_subkey_with_flags(sub, KEY_READ) else { return };
+        let Ok(key) = root.open_subkey_with_flags(sub, KEY_READ) else {
+            return;
+        };
         for (name, value) in key.enum_values().flatten() {
             map.insert(format!(r"{root_name}\{sub}!{name}"), value.to_string());
         }
@@ -193,7 +219,8 @@ mod registry {
         for sub in RUN_KEYS {
             values(&hklm, "HKLM", sub, map);
         }
-        if let Ok(wl) = hklm.open_subkey_with_flags(r"Software\Microsoft\Windows NT\CurrentVersion\Winlogon", KEY_READ) {
+        if let Ok(wl) = hklm.open_subkey_with_flags(r"Software\Microsoft\Windows NT\CurrentVersion\Winlogon", KEY_READ)
+        {
             for name in ["Shell", "Userinit"] {
                 if let Ok(v) = wl.get_value::<String, _>(name) {
                     map.insert(format!(r"HKLM\...\Winlogon!{name}"), v);
@@ -238,7 +265,10 @@ mod tests {
             extract_executable(r"C:\Program Files\App\app.exe /background"),
             Some(PathBuf::from(r"C:\Program Files\App\app.exe"))
         );
-        assert_eq!(extract_executable(r"\??\C:\drivers\x.sys"), Some(PathBuf::from(r"C:\drivers\x.sys")));
+        assert_eq!(
+            extract_executable(r"\??\C:\drivers\x.sys"),
+            Some(PathBuf::from(r"C:\drivers\x.sys"))
+        );
     }
 
     #[test]

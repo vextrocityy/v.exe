@@ -11,7 +11,8 @@ use std::io::{self, Read, Write};
 pub const PIPE_NAME: &str = r"\\.\pipe\sentinel_lite_ipc";
 /// Hard upper bound on one frame; protects the service from memory exhaustion.
 pub const MAX_FRAME_BYTES: u32 = 4 * 1024 * 1024;
-pub const PROTOCOL_VERSION: u32 = 1;
+/// Bumped on any incompatible change; the UI refuses to talk to a different version.
+pub const PROTOCOL_VERSION: u32 = 2;
 
 // ---------------------------------------------------------------------------
 // Domain types
@@ -82,6 +83,13 @@ pub struct EngineStatus {
     pub scan: ScanProgress,
     pub uptime_secs: u64,
     pub memory_bytes: Option<u64>,
+    /// Unix time of the last successful signature update.
+    #[serde(default)]
+    pub last_signature_update: Option<i64>,
+    #[serde(default)]
+    pub signature_update_error: Option<String>,
+    #[serde(default)]
+    pub update_in_progress: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,6 +104,7 @@ pub enum EventKind {
     ScanFinished,
     ScanError,
     SettingsChanged,
+    SignaturesUpdated,
     ServiceInfo,
 }
 
@@ -141,6 +150,17 @@ pub struct Settings {
     /// Run scan workers at background CPU + I/O priority.
     pub low_priority_scans: bool,
     pub persistence_poll_secs: u64,
+    /// Download signature updates automatically.
+    pub auto_update: bool,
+    pub update_interval_hours: u64,
+    /// Also import hashes from public community feeds (abuse.ch MalwareBazaar).
+    /// These are unsigned, so validly code-signed files they match are reported, not quarantined.
+    pub community_feeds: bool,
+    /// Official, Ed25519-signed pack URL (`<url>` + `<url>.sig`). Ignored unless the
+    /// build embeds a trusted public key.
+    pub update_url: Option<String>,
+    pub scheduled_scan: bool,
+    pub scheduled_scan_hours: u64,
 }
 
 impl Default for Settings {
@@ -159,6 +179,12 @@ impl Default for Settings {
             max_scan_threads: 0,
             low_priority_scans: true,
             persistence_poll_secs: 30,
+            auto_update: true,
+            update_interval_hours: 6,
+            community_feeds: true,
+            update_url: None,
+            scheduled_scan: true,
+            scheduled_scan_hours: 24,
         }
     }
 }
@@ -170,18 +196,35 @@ impl Default for Settings {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum Request {
-    Auth { token: String, client: String },
+    Auth {
+        token: String,
+        client: String,
+    },
     GetStatus,
-    StartScan { kind: ScanKind, paths: Vec<String> },
+    StartScan {
+        kind: ScanKind,
+        paths: Vec<String>,
+    },
     CancelScan,
     /// The user reviewed outstanding detections; clears the "threat detected" state.
     AcknowledgeThreats,
-    GetEvents { limit: u32, before_id: Option<i64> },
+    /// Download signature updates now.
+    UpdateSignatures,
+    GetEvents {
+        limit: u32,
+        before_id: Option<i64>,
+    },
     ListQuarantine,
-    RestoreQuarantine { id: String },
-    DeleteQuarantine { id: String },
+    RestoreQuarantine {
+        id: String,
+    },
+    DeleteQuarantine {
+        id: String,
+    },
     GetSettings,
-    UpdateSettings { settings: Settings },
+    UpdateSettings {
+        settings: Settings,
+    },
     /// Turn the connection into a push stream of `Response::Event`.
     Subscribe,
 }
@@ -204,6 +247,10 @@ pub enum Response {
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
     Unauthorized,
+    /// The operation weakens protection; retry from an elevated (administrator) client.
+    ElevationRequired,
+    /// The connecting program is not a trusted Sentinel-Lite component.
+    Forbidden,
     BadRequest,
     NotFound,
     Busy,
@@ -212,7 +259,10 @@ pub enum ErrorCode {
 
 impl Response {
     pub fn error(code: ErrorCode, message: impl Into<String>) -> Self {
-        Response::Error { code, message: message.into() }
+        Response::Error {
+            code,
+            message: message.into(),
+        }
     }
 }
 
@@ -266,10 +316,19 @@ mod tests {
 
     #[test]
     fn frame_roundtrip() {
-        let req = Request::StartScan { kind: ScanKind::Custom, paths: vec!["C:\\Users".into()] };
+        let req = Request::StartScan {
+            kind: ScanKind::Custom,
+            paths: vec!["C:\\Users".into()],
+        };
         let bytes = encode(&req).unwrap();
         let back: Request = read_frame(&mut &bytes[..]).unwrap();
-        assert!(matches!(back, Request::StartScan { kind: ScanKind::Custom, .. }));
+        assert!(matches!(
+            back,
+            Request::StartScan {
+                kind: ScanKind::Custom,
+                ..
+            }
+        ));
     }
 
     #[test]

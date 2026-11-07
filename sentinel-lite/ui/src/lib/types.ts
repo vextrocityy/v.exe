@@ -40,6 +40,9 @@ export interface EngineStatus {
   scan: ScanProgress;
   uptime_secs: number;
   memory_bytes: number | null;
+  last_signature_update: number | null;
+  signature_update_error: string | null;
+  update_in_progress: boolean;
 }
 
 export type EventKind =
@@ -52,6 +55,7 @@ export type EventKind =
   | "scan_finished"
   | "scan_error"
   | "settings_changed"
+  | "signatures_updated"
   | "service_info";
 
 export interface SecurityEvent {
@@ -88,6 +92,12 @@ export interface Settings {
   max_scan_threads: number;
   low_priority_scans: boolean;
   persistence_poll_secs: number;
+  auto_update: boolean;
+  update_interval_hours: number;
+  community_feeds: boolean;
+  update_url: string | null;
+  scheduled_scan: boolean;
+  scheduled_scan_hours: number;
 }
 
 export type StateTone = "safe" | "warn" | "danger";

@@ -41,9 +41,23 @@ pub const ALERT_MEDIUM: u32 = 40;
 pub const ALERT_HIGH: u32 = 70;
 
 /// Interpreters that are frequently abused as a second stage.
-const SCRIPT_HOSTS: &[&str] = &["powershell.exe", "pwsh.exe", "wscript.exe", "cscript.exe", "mshta.exe", "cmd.exe"];
+const SCRIPT_HOSTS: &[&str] = &[
+    "powershell.exe",
+    "pwsh.exe",
+    "wscript.exe",
+    "cscript.exe",
+    "mshta.exe",
+    "cmd.exe",
+];
 /// Applications that have no ordinary reason to launch a script host.
-const DOCUMENT_APPS: &[&str] = &["winword.exe", "excel.exe", "powerpnt.exe", "outlook.exe", "onenote.exe", "acrord32.exe"];
+const DOCUMENT_APPS: &[&str] = &[
+    "winword.exe",
+    "excel.exe",
+    "powerpnt.exe",
+    "outlook.exe",
+    "onenote.exe",
+    "acrord32.exe",
+];
 
 /// Final path component, lower-cased. Splits on both separators so Windows
 /// paths are handled identically on every host (and in tests).
@@ -77,9 +91,14 @@ fn has_encoded_command_flag(cmd: &str) -> bool {
 
 fn in_user_writable_location(p: &Path) -> bool {
     let s = p.to_string_lossy().to_ascii_lowercase().replace('/', "\\");
-    ["\\appdata\\local\\temp\\", "\\downloads\\", "\\windows\\temp\\", "\\users\\public\\"]
-        .iter()
-        .any(|frag| s.contains(frag))
+    [
+        "\\appdata\\local\\temp\\",
+        "\\downloads\\",
+        "\\windows\\temp\\",
+        "\\users\\public\\",
+    ]
+    .iter()
+    .any(|frag| s.contains(frag))
 }
 
 pub fn assess_process(ctx: &ProcessContext<'_>) -> Assessment {
@@ -233,7 +252,9 @@ mod tests {
         let a = assess_process(&ProcessContext {
             image: Path::new(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"),
             command_line: Some(&cmd),
-            parent_image: Some(Path::new(r"C:\Program Files\Microsoft Office\root\Office16\WINWORD.EXE")),
+            parent_image: Some(Path::new(
+                r"C:\Program Files\Microsoft Office\root\Office16\WINWORD.EXE",
+            )),
         });
         assert!(a.score >= ALERT_HIGH, "{a:?}");
         assert_eq!(a.reasons.len(), 3);
@@ -243,7 +264,9 @@ mod tests {
     fn encoded_flag_prefix_matching() {
         assert!(has_encoded_command_flag("powershell -EncodedCommand AAA"));
         assert!(has_encoded_command_flag("powershell -ec AAA"));
-        assert!(!has_encoded_command_flag("powershell -ExecutionPolicy Bypass -File x.ps1"));
+        assert!(!has_encoded_command_flag(
+            "powershell -ExecutionPolicy Bypass -File x.ps1"
+        ));
         assert!(has_encoded_command_flag("powershell -e AAA"));
     }
 

@@ -18,6 +18,7 @@ export const api = {
   startScan: (kind: ScanKind, paths?: string[]) => invoke<number>("start_scan", { kind, paths }),
   cancelScan: () => invoke<void>("cancel_scan"),
   acknowledgeThreats: () => invoke<void>("acknowledge_threats"),
+  updateSignatures: () => invoke<void>("update_signatures"),
   getEvents: (limit = 100, beforeId?: number) => invoke<SecurityEvent[]>("get_events", { limit, beforeId }),
   listQuarantine: () => invoke<QuarantineItem[]>("list_quarantine"),
   restoreQuarantine: (id: string) => invoke<void>("restore_quarantine", { id }),

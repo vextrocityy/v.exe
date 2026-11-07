@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Plus, X } from "lucide-react";
+import { Plus, ShieldAlert, X } from "lucide-react";
 import { Panel } from "../components/Panel";
 import { Toggle } from "../components/Toggle";
 import { api } from "../lib/api";
@@ -54,6 +54,10 @@ export function SettingsPage() {
 
   return (
     <div className="space-y-6 pb-20">
+      <p className="flex items-center gap-2 text-xs text-slate-500">
+        <ShieldAlert className="h-4 w-4 text-amber-400/80" />
+        Changes that reduce protection (turning shields off, adding exclusions) ask for administrator approval.
+      </p>
       <Panel>
         <Row label="Real-time protection" hint="Master switch for every shield below." strong>
           <Toggle label="Real-time protection" checked={s.realtime_protection} onChange={(v) => set("realtime_protection", v)} />
@@ -82,6 +86,24 @@ export function SettingsPage() {
           </Row>
         </Panel>
       </div>
+
+      <Panel title="Updates & schedule">
+        <Row label="Automatic signature updates" hint="Download new threat signatures in the background.">
+          <Toggle label="Automatic signature updates" checked={s.auto_update} onChange={(v) => set("auto_update", v)} />
+        </Row>
+        <Row label="Update interval (hours)" hint="How often to check for new signatures.">
+          <NumberInput value={s.update_interval_hours} min={1} max={168} onChange={(v) => set("update_interval_hours", v)} />
+        </Row>
+        <Row label="Community threat feed" hint="Add malware hashes from abuse.ch MalwareBazaar. Code-signed and Windows files matched only by this feed are reported, never quarantined.">
+          <Toggle label="Community threat feed" checked={s.community_feeds} onChange={(v) => set("community_feeds", v)} />
+        </Row>
+        <Row label="Scheduled quick scan" hint="Run a low-priority quick scan in the background.">
+          <Toggle label="Scheduled quick scan" checked={s.scheduled_scan} onChange={(v) => set("scheduled_scan", v)} />
+        </Row>
+        <Row label="Scan every (hours)" hint="Interval between scheduled quick scans.">
+          <NumberInput value={s.scheduled_scan_hours} min={1} max={720} onChange={(v) => set("scheduled_scan_hours", v)} />
+        </Row>
+      </Panel>
 
       <Panel title="Exclusions">
         <div className="space-y-3 p-5">

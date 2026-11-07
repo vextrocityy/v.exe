@@ -13,20 +13,20 @@ use tokio::sync::watch;
 pub fn init_logging(paths: &AppPaths, to_console: bool) {
     use tracing_subscriber::EnvFilter;
     let filter = EnvFilter::try_from_env("SENTINEL_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
+    crate::util::install_panic_hook();
     let builder = tracing_subscriber::fmt().with_env_filter(filter).with_target(false);
     if to_console {
         let _ = builder.try_init();
         return;
     }
     let _ = std::fs::create_dir_all(&paths.logs);
-    let log = paths.logs.join("service.log");
-    // Simple size-based rotation at start-up keeps the log bounded.
-    if std::fs::metadata(&log).map(|m| m.len() > 10 * 1024 * 1024).unwrap_or(false) {
-        let _ = std::fs::rename(&log, paths.logs.join("service.log.1"));
-    }
-    match std::fs::OpenOptions::new().create(true).append(true).open(&log) {
+    // 4 x 10 MB cap on disk, rotated while running.
+    match crate::util::RotatingFile::open(&paths.logs.join("service.log"), 10 * 1024 * 1024, 3) {
         Ok(file) => {
-            let _ = builder.with_ansi(false).with_writer(std::sync::Mutex::new(file)).try_init();
+            let _ = builder
+                .with_ansi(false)
+                .with_writer(std::sync::Mutex::new(file))
+                .try_init();
         }
         Err(_) => {
             let _ = builder.try_init();
@@ -37,7 +37,10 @@ pub fn init_logging(paths: &AppPaths, to_console: bool) {
 /// Signature packs shipped next to the executable, plus user/feed packs.
 fn signature_dirs(paths: &AppPaths) -> Vec<PathBuf> {
     let mut dirs = vec![paths.signatures.clone()];
-    if let Some(exe_dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
+    if let Some(exe_dir) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+    {
         dirs.push(exe_dir.join("signatures"));
     }
     if let Some(extra) = std::env::var_os("SENTINEL_SIGNATURES") {
@@ -50,7 +53,13 @@ fn signature_dirs(paths: &AppPaths) -> Vec<PathBuf> {
 
 pub fn build_engine(paths: AppPaths) -> Result<Arc<Engine>> {
     paths.create_all().context("creating data directories")?;
-    let db = Database::open(&paths.database)?;
+    if let Err(e) = crate::platform::harden_data_dir(&paths.data) {
+        tracing::warn!(error = %e, "could not restrict data directory permissions");
+    }
+    let (db, rebuilt) = Database::open_or_recover(&paths.database)?;
+    if rebuilt {
+        tracing::warn!("database was corrupt and has been rebuilt; scan cache and history were reset");
+    }
     let dirs = signature_dirs(&paths);
     let refs: Vec<&std::path::Path> = dirs.iter().map(|d| d.as_path()).collect();
     let imported = signatures::import_all(&db, &refs);
@@ -63,12 +72,23 @@ pub fn build_engine(paths: AppPaths) -> Result<Arc<Engine>> {
 pub async fn run(paths: AppPaths, shutdown: impl std::future::Future<Output = ()>) -> Result<()> {
     let engine = build_engine(paths)?;
     let token = Arc::new(AuthToken::generate()?);
-    token.write_to(&sentinel_protocol::paths::token_file()).context("writing IPC token")?;
+    let token_path = sentinel_protocol::paths::token_file();
+    token.write_to(&token_path).context("writing IPC token")?;
+    if let Err(e) = crate::platform::harden_token_file(&token_path) {
+        tracing::warn!(error = %e, "could not set IPC token permissions");
+    }
+    match crate::platform::install_dir() {
+        Some(dir) if crate::platform::is_protected_dir(&dir) => {
+            tracing::info!(dir = %dir.display(), "IPC clients restricted to the install directory")
+        }
+        _ => tracing::warn!("running outside Program Files: IPC client verification is DISABLED (dev mode)"),
+    }
 
     {
         let e = engine.clone();
         tokio::task::spawn_blocking(move || e.start_realtime()).await?;
     }
+    engine.start_scheduler();
     engine.emit(
         EventKind::ServiceInfo,
         Severity::Info,
