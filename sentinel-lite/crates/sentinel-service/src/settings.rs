@@ -54,6 +54,11 @@ pub fn sanitize(mut s: Settings) -> Settings {
     s.trusted_apps
         .retain(|t| crate::database::signatures::is_sha256(&t.sha256));
     s.trusted_apps.dedup();
+    s.app_update_api = s
+        .app_update_api
+        .take()
+        .map(|u| u.trim().to_string())
+        .filter(|u| crate::engine::appupdate::is_allowed_api_url(u));
     s.trusted_apps.truncate(512);
     clean(&mut s.exclusions);
     clean(&mut s.watch_paths);
@@ -92,7 +97,7 @@ pub fn is_allowed_update_url(u: &str) -> bool {
 /// Empty = the change is neutral or strengthening and needs no elevation.
 pub fn weakenings(old: &Settings, new: &Settings) -> Vec<String> {
     let mut out = Vec::new();
-    let flags: [(&str, bool, bool); 19] = [
+    let flags: [(&str, bool, bool); 20] = [
         ("real-time protection", old.realtime_protection, new.realtime_protection),
         ("Process Guard", old.process_monitor, new.process_monitor),
         ("File Shield", old.file_monitor, new.file_monitor),
@@ -120,6 +125,7 @@ pub fn weakenings(old: &Settings, new: &Settings) -> Vec<String> {
         ),
         ("entropy detection", old.entropy_detection, new.entropy_detection),
         ("Network Guard", old.network_guard, new.network_guard),
+        ("automatic app updates", old.auto_update_app, new.auto_update_app),
     ];
     for (name, before, after) in flags {
         if before && !after {
@@ -141,6 +147,9 @@ pub fn weakenings(old: &Settings, new: &Settings) -> Vec<String> {
     }
     if !new.scheduled_scan && old.scheduled_scan {
         out.push("turns off scheduled scans".into());
+    }
+    if new.app_update_api != old.app_update_api {
+        out.push("changes where app updates come from".into());
     }
     if new.trusted_apps.iter().any(|t| !old.trusted_apps.contains(t)) {
         out.push("trusts additional programs".into());

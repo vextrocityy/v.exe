@@ -48,6 +48,8 @@ export interface EngineStatus {
   system_memory_percent: number | null;
   network_blocked_ranges: number;
   hardening: HardeningCheck[];
+  build: number;
+  app_update_status: string | null;
 }
 
 export interface HardeningCheck {
@@ -132,6 +134,8 @@ export interface Settings {
   entropy_detection: boolean;
   network_guard: boolean;
   trusted_apps: TrustedApp[];
+  auto_update_app: boolean;
+  app_update_api: string | null;
 }
 
 export type ProcessAction = "resume" | "terminate";

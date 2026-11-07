@@ -20,6 +20,55 @@ const RESPONSE: { key: BoolKey; label: string; hint: string }[] = [
   { key: "low_priority_scans", label: "Low-priority scanning", hint: "Run scans at background CPU and disk priority." },
 ];
 
+function AppUpdateRow({ s, set }: { s: Settings; set: <K extends keyof Settings>(k: K, v: Settings[K]) => void }) {
+  const [status, setStatus] = useState<string | null>(null);
+  const [build, setBuild] = useState<number | null>(null);
+  const [busy, setBusy] = useState(false);
+  const refresh = () =>
+    api.getStatus().then((st) => {
+      setStatus(st.app_update_status);
+      setBuild(st.build);
+    }).catch(() => {});
+  useEffect(() => {
+    refresh();
+  }, []);
+  const check = async () => {
+    setBusy(true);
+    try {
+      await api.checkAppUpdate();
+      for (let i = 0; i < 20; i++) {
+        await new Promise((r) => setTimeout(r, 1000));
+        const st = await api.getStatus();
+        setStatus(st.app_update_status);
+        if (st.app_update_status && !st.app_update_status.startsWith("Checking")) break;
+      }
+    } catch (e) {
+      setStatus(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <>
+      <Row label="Install app updates automatically" hint="New Sentinel-Lite releases are downloaded from this project's GitHub Releases, checked against their SHA-256 checksums and installed silently. The dashboard reopens in the tray afterwards.">
+        <Toggle label="Install app updates automatically" checked={s.auto_update_app} onChange={(v) => set("auto_update_app", v)} />
+      </Row>
+      <div className="flex items-center justify-between gap-6 border-b border-slate-800/70 px-5 py-4">
+        <div>
+          <p className="text-sm text-slate-200">App version</p>
+          <p className="text-xs text-slate-500">
+            {build ? `Build ${build}` : "Development build"}
+            {status ? ` · ${status}` : ""}
+          </p>
+        </div>
+        <button onClick={check} disabled={busy} className="shrink-0 rounded-lg border border-slate-700 px-3 py-1.5 text-sm text-slate-300 hover:border-cyan-400/50 hover:text-cyan-300 disabled:opacity-50">
+          {busy ? "Checking…" : "Check now"}
+        </button>
+      </div>
+    </>
+  );
+}
+
 export function SettingsPage() {
   const [s, setS] = useState<Settings | null>(null);
   const [saved, setSaved] = useState<Settings | null>(null);
@@ -88,6 +137,7 @@ export function SettingsPage() {
       </div>
 
       <Panel title="Updates & schedule">
+        <AppUpdateRow s={s} set={set} />
         <Row label="Automatic signature updates" hint="Download new threat signatures in the background.">
           <Toggle label="Automatic signature updates" checked={s.auto_update} onChange={(v) => set("auto_update", v)} />
         </Row>

@@ -60,6 +60,8 @@ jobs:
         shell: pwsh
         env:
           SENTINEL_UPDATE_PUBKEYS: ${{ vars.SENTINEL_UPDATE_PUBKEYS }}
+          # Build number baked into the engine; matches the release tag, so installs can self-update.
+          SENTINEL_BUILD: ${{ github.run_number }}
         run: ./scripts/build-release.ps1
       - name: Clippy (dashboard backend)
         run: cargo clippy --locked -p sentinel-ui -- -D warnings
@@ -90,6 +92,56 @@ jobs:
           if ($out -notmatch "not a trusted Sentinel-Lite component") { throw "unexpected refusal: $out" }
           "Untrusted client refused as expected"
           if (-not (Get-ItemProperty "HKLM:\Software\Microsoft\Windows\CurrentVersion\Run")."Sentinel-Lite") { throw "autostart entry missing" }
+          # --- Self-update: serve a "newer" release locally and let the service install it ---
+          $svc = "$dir\sentinel-service.exe"
+          $build = [int]((& $svc version) -replace '.*build (\d+).*', '$1')
+          if ($build -lt 1) { throw "installed engine has no build number" }
+          $srv = Join-Path $env:TEMP "update-server"; New-Item -ItemType Directory -Force $srv | Out-Null
+          $name = $installer.Name
+          Copy-Item $installer.FullName (Join-Path $srv $name)
+          $hash = (Get-FileHash (Join-Path $srv $name) -Algorithm SHA256).Hash.ToLower()
+          Set-Content (Join-Path $srv "SHA256SUMS.txt") "$hash  $name" -Encoding ascii
+          $next = $build + 1
+          @{ tag_name = "sentinel-lite-build-$next"; draft = $false; prerelease = $false; assets = @(
+              @{ name = $name; browser_download_url = "http://127.0.0.1:8765/$name" },
+              @{ name = "SHA256SUMS.txt"; browser_download_url = "http://127.0.0.1:8765/SHA256SUMS.txt" }) } |
+            ConvertTo-Json -Depth 4 | Set-Content (Join-Path $srv "latest") -Encoding ascii
+          $server = Start-Job -ArgumentList $srv -ScriptBlock {
+            param($root)
+            $l = [System.Net.HttpListener]::new(); $l.Prefixes.Add("http://127.0.0.1:8765/"); $l.Start()
+            while ($true) {
+              $ctx = $l.GetContext(); $p = Join-Path $root $ctx.Request.Url.AbsolutePath.TrimStart('/')
+              if (Test-Path $p -PathType Leaf) { $b = [IO.File]::ReadAllBytes($p); $ctx.Response.ContentLength64 = $b.Length; $ctx.Response.OutputStream.Write($b, 0, $b.Length) }
+              else { $ctx.Response.StatusCode = 404 }
+              $ctx.Response.Close()
+            }
+          }
+          Start-Sleep 2
+          $settings = (& $svc settings | Out-String | ConvertFrom-Json).data
+          $settings.app_update_api = "http://127.0.0.1:8765/latest"
+          $json = @{ type = "update_settings"; data = @{ settings = $settings } } | ConvertTo-Json -Depth 8 -Compress
+          & $svc elevated-request (-join ([Text.Encoding]::UTF8.GetBytes($json) | ForEach-Object { $_.ToString("x2") }))
+          if ($LASTEXITCODE) { throw "could not point the updater at the test server" }
+          $before = (Get-Process sentinel-service).StartTime
+          & $svc app-update | Out-Host
+          $deadline = (Get-Date).AddSeconds(150); $done = $false
+          while ((Get-Date) -lt $deadline -and -not $done) {
+            Start-Sleep 3
+            try {
+              $ev = (& $svc events 30 | Out-String | ConvertFrom-Json).data
+              $done = [bool]($ev | Where-Object { $_.title -like "Updated to build*" -or $_.title -like "Update to build $next did not complete*" })
+            } catch { }
+          }
+          Stop-Job $server; Remove-Job $server -Force
+          if (-not $done) { throw "self-update did not complete (no post-update event)" }
+          $ev | Select-Object -First 6 | Format-Table severity, title -AutoSize | Out-Host
+          if (-not ($ev | Where-Object { $_.title -eq "Installing Sentinel-Lite build $next" })) { throw "updater never started the installer" }
+          if ((Get-Service SentinelLite).Status -ne "Running") { throw "service not running after self-update" }
+          if ((Get-Process sentinel-service).StartTime -le $before) { throw "service was not restarted by the update" }
+          "Self-update OK: downloaded, SHA-256 verified, installed silently, service restarted"
+          # (The test reuses the same installer, so the restarted service correctly reports it is
+          #  still build $build: the mechanism, not a version change, is what is verified here.)
+
           Start-Process "$dir\uninstall.exe" -ArgumentList "/S" -Wait
           Start-Sleep 10
           if (Get-Service SentinelLite -ErrorAction SilentlyContinue) { throw "service still registered after uninstall" }

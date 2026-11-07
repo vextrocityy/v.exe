@@ -6,8 +6,9 @@
 
 !macro NSIS_HOOK_PREINSTALL
   ; Upgrade: stop the running engine so its executable can be replaced.
-  IfFileExists "$INSTDIR\sentinel-service.exe" 0 +2
+  IfFileExists "$INSTDIR\sentinel-service.exe" 0 +3
     nsExec::ExecToLog '"$INSTDIR\sentinel-service.exe" stop'
+    Sleep 2000 ; let the old process exit and release its files
   ; Close a running dashboard instance.
   nsExec::ExecToLog 'taskkill /IM sentinel-lite.exe /F'
 !macroend

@@ -212,6 +212,10 @@ async fn dispatch(engine: &Arc<Engine>, req: Request, peer: &Peer) -> Response {
             })
             .await
         }
+        Request::CheckAppUpdate => Ok(match e.start_app_update() {
+            Ok(()) => Response::Ok,
+            Err(m) => Response::error(ErrorCode::Busy, m),
+        }),
         Request::UpdateSignatures => Ok(match e.start_update() {
             Ok(()) => Response::Ok,
             Err(m) => Response::error(ErrorCode::Busy, m),

@@ -139,6 +139,18 @@ Data lives in `%ProgramData%\SentinelLite\` (`sentinel.db`, `quarantine\`, `sign
 15. **Windows hardening panel.** The dashboard checks LSA protection (blocks LSASS credential
     dumping), the firewall profiles and UAC, and can switch LSA protection on.
 
+### Automatic app updates
+
+Release builds carry their CI build number (`sentinel-service version`). Every 6 hours, or on
+**Settings → Updates & schedule → Check now**, the service asks GitHub for this project's latest
+release. If the build number is higher, it downloads the installer, verifies its SHA-256 against
+the release's `SHA256SUMS.txt`, and runs it silently as SYSTEM. No prompt is needed. The installer
+stops the old service, replaces the files and starts the new one, which reports
+"Updated to build N" and reopens the dashboard in the tray if it was open.
+Trust is the same as downloading from the Releases page yourself: HTTPS, `github.com`, this
+repository only, and the checksum. Local/dev builds (build 0) never update themselves. Turn it off
+with **Install app updates automatically**.
+
 ### Deliberately not built (and what covers it instead)
 
 | Requested | Why not | Instead |

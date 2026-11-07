@@ -21,6 +21,7 @@ export const api = {
   updateSignatures: () => invoke<void>("update_signatures"),
   processAction: (pid: number, action: ProcessAction) => invoke<void>("process_action", { pid, action }),
   trustApp: (path: string) => invoke<void>("trust_app", { path }),
+  checkAppUpdate: () => invoke<void>("check_app_update"),
   enableHardening: (id: string) => invoke<void>("enable_hardening", { id }),
   getEvents: (limit = 100, beforeId?: number) => invoke<SecurityEvent[]>("get_events", { limit, beforeId }),
   listQuarantine: () => invoke<QuarantineItem[]>("list_quarantine"),

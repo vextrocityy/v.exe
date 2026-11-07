@@ -39,9 +39,12 @@ const settings: Settings = {
   block_office_children: true,
   entropy_detection: true,
   network_guard: true,
+  auto_update_app: true,
+  app_update_api: null,
   trusted_apps: [{ path: "C:\\Users\\alex\\Downloads\\tools\\putty.exe", sha256: "9f".repeat(32) }],
 };
 let lsaOn = false;
+let appUpdate: string | null = "Up to date (build 14)";
 let lastUpdate = now() - 3 * 3600;
 let updating = false;
 
@@ -104,6 +107,8 @@ function status(): EngineStatus {
     cpu_percent: 0.1 + Math.random() * 0.3,
     system_memory_percent: 41 + Math.random() * 2,
     network_blocked_ranges: settings.network_guard ? 1489 : 0,
+    build: 14,
+    app_update_status: appUpdate,
     hardening: [
       { id: "lsa_protection", name: "LSA protection (credential theft)", ok: lsaOn, detail: lsaOn ? "LSASS runs as a protected process." : "Off. Turning it on stops tools like Mimikatz from reading passwords out of LSASS memory. Takes effect after a restart.", fixable: !lsaOn },
       { id: "firewall", name: "Windows Firewall", ok: true, detail: "On for all network profiles.", fixable: false },
@@ -144,6 +149,10 @@ export const mock = {
         case "acknowledge_threats": return undefined;
         case "trust_app":
           settings.trusted_apps = [...settings.trusted_apps, { path: args.path as string, sha256: "ab".repeat(32) }];
+          return undefined;
+        case "check_app_update":
+          appUpdate = "Checking for app updates…";
+          setTimeout(() => (appUpdate = "Up to date (build 14)"), 1200);
           return undefined;
         case "enable_hardening":
           lsaOn = true;

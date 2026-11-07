@@ -12,7 +12,7 @@ pub const PIPE_NAME: &str = r"\\.\pipe\sentinel_lite_ipc";
 /// Hard upper bound on one frame; protects the service from memory exhaustion.
 pub const MAX_FRAME_BYTES: u32 = 4 * 1024 * 1024;
 /// Bumped on any incompatible change; the UI refuses to talk to a different version.
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 /// Placeholder sent instead of stored secrets; sending it back means "unchanged".
 pub const SECRET_MASK: &str = "********";
 
@@ -107,6 +107,12 @@ pub struct EngineStatus {
     /// Windows security features Sentinel-Lite relies on (LSA protection, firewall, UAC).
     #[serde(default)]
     pub hardening: Vec<HardeningCheck>,
+    /// CI build number of this installation (0 = local dev build).
+    #[serde(default)]
+    pub build: u64,
+    /// Human-readable state of app self-updates.
+    #[serde(default)]
+    pub app_update_status: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -227,6 +233,11 @@ pub struct Settings {
     pub network_guard: bool,
     /// Programs allowed despite Execution Guard.
     pub trusted_apps: Vec<TrustedApp>,
+    /// Install new Sentinel-Lite releases automatically (silently, by the service).
+    pub auto_update_app: bool,
+    /// Where releases are looked up. `None` = this project's GitHub releases.
+    /// Only GitHub API URLs (or a loopback test server) are accepted.
+    pub app_update_api: Option<String>,
 }
 
 impl Default for Settings {
@@ -265,6 +276,8 @@ impl Default for Settings {
             entropy_detection: true,
             network_guard: true,
             trusted_apps: Vec::new(),
+            auto_update_app: true,
+            app_update_api: None,
         }
     }
 }
@@ -303,6 +316,8 @@ pub enum Request {
     EnableHardening {
         id: String,
     },
+    /// Look for a newer Sentinel-Lite release now and install it if found.
+    CheckAppUpdate,
     GetEvents {
         limit: u32,
         before_id: Option<i64>,

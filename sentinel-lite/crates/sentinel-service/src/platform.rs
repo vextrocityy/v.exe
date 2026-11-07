@@ -377,6 +377,79 @@ mod imp {
         }
     }
 
+    /// Run an NSIS installer silently, detached from this service so it keeps
+    /// running when the installer stops the service it is replacing.
+    pub fn run_installer_detached(installer: &Path) -> anyhow::Result<()> {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+        let spawn = |flags: u32| {
+            std::process::Command::new(installer)
+                .arg("/S")
+                .creation_flags(flags)
+                .spawn()
+        };
+        spawn(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB)
+            .or_else(|_| spawn(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)) // not in a job that allows breakaway
+            .map(|_| ())
+            .map_err(|e| anyhow::anyhow!("could not start the installer: {e}"))
+    }
+
+    /// Start `exe` in the signed-in console user's session (we run as SYSTEM
+    /// in session 0). Used to put the dashboard back after an update.
+    pub fn launch_in_user_session(exe: &Path, args: &str) -> bool {
+        use windows_sys::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
+        use windows_sys::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
+        use windows_sys::Win32::System::Threading::{
+            CreateProcessAsUserW, CREATE_UNICODE_ENVIRONMENT, PROCESS_INFORMATION, STARTUPINFOW,
+        };
+        unsafe {
+            let session = WTSGetActiveConsoleSessionId();
+            if session == u32::MAX {
+                return false; // nobody signed in
+            }
+            let mut token: HANDLE = std::ptr::null_mut();
+            if WTSQueryUserToken(session, &mut token) == 0 {
+                return false;
+            }
+            let token = Handle(token);
+            let mut env: *mut c_void = std::ptr::null_mut();
+            let have_env = CreateEnvironmentBlock(&mut env, token.0, 0) != 0;
+            let mut cmd: Vec<u16> = format!("\"{}\" {args}", exe.display())
+                .encode_utf16()
+                .chain(Some(0))
+                .collect();
+            let mut desktop: Vec<u16> = "winsta0\\default".encode_utf16().chain(Some(0)).collect();
+            let mut si: STARTUPINFOW = std::mem::zeroed();
+            si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+            si.lpDesktop = desktop.as_mut_ptr();
+            let mut pi: PROCESS_INFORMATION = std::mem::zeroed();
+            let app = wide(exe);
+            let ok = CreateProcessAsUserW(
+                token.0,
+                app.as_ptr(),
+                cmd.as_mut_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                CREATE_UNICODE_ENVIRONMENT,
+                if have_env { env } else { std::ptr::null() },
+                std::ptr::null(),
+                &si,
+                &mut pi,
+            ) != 0;
+            if have_env {
+                DestroyEnvironmentBlock(env);
+            }
+            if ok {
+                CloseHandle(pi.hThread);
+                CloseHandle(pi.hProcess);
+            }
+            ok
+        }
+    }
+
     /// Total bytes written by `pid` since it started.
     pub fn write_bytes(pid: u32) -> Option<u64> {
         use windows_sys::Win32::System::Threading::{GetProcessIoCounters, IO_COUNTERS};
@@ -439,6 +512,17 @@ mod imp {
             }
         }
     }
+}
+
+/// Is the dashboard (`sentinel-lite.exe`) running in any session?
+pub fn dashboard_running() -> bool {
+    list_processes()
+        .into_iter()
+        .filter_map(|p| image_path(p.pid))
+        .any(|img| {
+            img.file_name()
+                .is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case("sentinel-lite.exe"))
+        })
 }
 
 /// Is `client` a trusted Sentinel-Lite component? When the service runs from a
@@ -575,6 +659,14 @@ mod imp {
     }
 
     pub fn hide_file(_path: &std::path::Path) {}
+
+    pub fn run_installer_detached(_installer: &std::path::Path) -> anyhow::Result<()> {
+        anyhow::bail!("installers are Windows-only")
+    }
+
+    pub fn launch_in_user_session(_exe: &std::path::Path, _args: &str) -> bool {
+        false
+    }
 
     pub fn unhide_file(_path: &std::path::Path) {}
 

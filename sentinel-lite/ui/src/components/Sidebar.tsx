@@ -53,7 +53,7 @@ export function Sidebar({ page, onNavigate, status, connected }: { page: Page; o
         </div>
         {status && (
           <p className="font-mono">
-            v{status.service_version} · {formatBytes(status.memory_bytes)} RAM
+            v{status.service_version}{status.build ? ` build ${status.build}` : " dev"} · {formatBytes(status.memory_bytes)} RAM
           </p>
         )}
       </div>

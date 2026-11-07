@@ -88,6 +88,9 @@ pub async fn run(paths: AppPaths, shutdown: impl std::future::Future<Output = ()
         let e = engine.clone();
         tokio::task::spawn_blocking(move || e.start_realtime()).await?;
     }
+    crate::util::contain("finish app update", || {
+        crate::engine::appupdate::finish_pending(&engine)
+    });
     engine.start_scheduler();
     {
         // Compile/load YARA rules off the startup path; shields work meanwhile with hashes.

@@ -1,6 +1,7 @@
 //! The protection engine: owns the database, quarantine vault, settings,
 //! real-time shields and on-demand scans, and publishes security events.
 
+pub mod appupdate;
 pub mod archive;
 pub mod hasher;
 pub mod heuristics;
@@ -85,6 +86,8 @@ pub struct Engine {
     last_decoy_response: Mutex<Option<Instant>>,
     firewall: Mutex<Option<netguard::Firewall>>,
     cpu_sample: Mutex<Option<(Instant, std::time::Duration)>>,
+    app_update_status: Mutex<Option<String>>,
+    app_update_running: AtomicBool,
     started: Instant,
 }
 
@@ -117,6 +120,8 @@ impl Engine {
             last_decoy_response: Mutex::new(None),
             firewall: Mutex::new(None),
             cpu_sample: Mutex::new(None),
+            app_update_status: Mutex::new(None),
+            app_update_running: AtomicBool::new(false),
             started: Instant::now(),
         }))
     }
@@ -778,6 +783,41 @@ impl Engine {
             .any(|t| t.sha256 == sha256)
     }
 
+    /// Check for (and install) a newer Sentinel-Lite release. Blocking.
+    pub fn check_app_update(&self) -> Result<String, String> {
+        if self.app_update_running.swap(true, Ordering::AcqRel) {
+            return Err("an app update check is already running".into());
+        }
+        *lock(&self.app_update_status) = Some("Checking for app updates…".into());
+        let result = crate::util::contain("app update", || appupdate::check_and_install(self))
+            .unwrap_or_else(|| Err(anyhow::anyhow!("internal error")))
+            .map_err(|e| format!("{e:#}"));
+        self.app_update_running.store(false, Ordering::Release);
+        self.db.set_counter("last_app_update_check", now_unix());
+        *lock(&self.app_update_status) = Some(match &result {
+            Ok(line) => line.clone(),
+            Err(e) => format!("Update check failed: {e}"),
+        });
+        if let Err(e) = &result {
+            tracing::warn!(error = %e, "app update check failed");
+        }
+        result
+    }
+
+    pub fn start_app_update(self: &Arc<Self>) -> Result<(), String> {
+        if self.app_update_running.load(Ordering::Acquire) {
+            return Err("an app update check is already running".into());
+        }
+        let e = self.clone();
+        std::thread::Builder::new()
+            .name("app-update".into())
+            .spawn(move || {
+                let _ = e.check_app_update();
+            })
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
     pub fn enable_hardening(&self, id: &str) -> anyhow::Result<String> {
         let msg = crate::platform::enable_hardening(id)?;
         self.emit(
@@ -1144,6 +1184,8 @@ impl Engine {
             system_memory_percent: crate::platform::system_memory_percent(),
             network_blocked_ranges: lock(&self.firewall).as_ref().map(|f| f.ranges as u64).unwrap_or(0),
             hardening: crate::platform::hardening_checks(),
+            build: appupdate::build(),
+            app_update_status: lock(&self.app_update_status).clone(),
         }
     }
 }

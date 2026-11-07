@@ -100,6 +100,11 @@ async fn enable_hardening(id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn check_app_update() -> Result<(), String> {
+    call(Request::CheckAppUpdate).await.map(|_| ()).map_err(Into::into)
+}
+
+#[tauri::command]
 async fn get_events(limit: Option<u32>, before_id: Option<i64>) -> Result<Vec<SecurityEvent>, String> {
     match call(Request::GetEvents {
         limit: limit.unwrap_or(100),
@@ -286,6 +291,7 @@ pub fn run() {
             update_signatures,
             process_action,
             trust_app,
+            check_app_update,
             enable_hardening,
             get_events,
             list_quarantine,

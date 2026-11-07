@@ -21,6 +21,7 @@ what it does.
 - [x] Entropy-based encryption detection feeding the same suspend response
 - [x] Network Guard (WFP dynamic-session block filters, Spamhaus DROP + personal list)
 - [x] Windows hardening panel (LSA protection, firewall, UAC) and live resource meter
+- [x] Automatic app updates (silent, SHA-256 verified, from this project's GitHub Releases)
 - [x] Windows CI: real service install + ETW/File Shield/Process Guard/elevation smoke test + installer install/uninstall
 
 ## Known limitations
@@ -44,7 +45,6 @@ what it does.
 - [ ] Signed allow-list packs (retract false positives centrally).
 - [ ] Exact writer attribution for decoy changes via the ETW Kernel-File provider.
 - [ ] `RegNotifyChangeKeyValue` instead of polling; Scheduled Tasks + WMI subscriptions as persistence sources.
-- [ ] Dashboard auto-update (Tauri updater) for the UI and engine.
 
 ## Phase 3: kernel components (needs EV certificate + Microsoft attestation signing)
 

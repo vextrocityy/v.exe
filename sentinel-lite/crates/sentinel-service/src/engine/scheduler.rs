@@ -64,6 +64,12 @@ fn tick(engine: &Arc<Engine>) {
             tracing::warn!(error = %e, "scheduled update failed");
         }
     }
+    if s.auto_update_app && now - counter("last_app_update_check") >= 6 * 3600 {
+        match engine.check_app_update() {
+            Ok(line) => tracing::info!("app update: {line}"),
+            Err(e) => tracing::warn!(error = %e, "scheduled app update check failed"),
+        }
+    }
 
     if s.scheduled_scan
         && !engine.scan_state().is_running()
