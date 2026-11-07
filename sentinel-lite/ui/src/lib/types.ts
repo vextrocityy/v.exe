@@ -95,6 +95,8 @@ export interface Settings {
   auto_update: boolean;
   update_interval_hours: number;
   community_feeds: boolean;
+  /** Masked as "********" by the service; send it back unchanged to keep the stored key. */
+  abusech_auth_key: string | null;
   update_url: string | null;
   scheduled_scan: boolean;
   scheduled_scan_hours: number;

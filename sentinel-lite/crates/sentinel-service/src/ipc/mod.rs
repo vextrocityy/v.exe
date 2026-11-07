@@ -152,7 +152,9 @@ async fn dispatch(engine: &Arc<Engine>, req: Request, peer: &Peer) -> Response {
             return elevation_required("releases a detected threat");
         }
         Request::UpdateSettings { settings } if !peer.elevated => {
-            let reasons = crate::settings::weakenings(&engine.settings(), &crate::settings::sanitize(settings.clone()));
+            let current = engine.settings();
+            let proposed = crate::settings::merge_secrets(&current, crate::settings::sanitize(settings.clone()));
+            let reasons = crate::settings::weakenings(&current, &proposed);
             if !reasons.is_empty() {
                 return elevation_required(&format!("change {}", reasons.join(", ")));
             }
@@ -212,10 +214,10 @@ async fn dispatch(engine: &Arc<Engine>, req: Request, peer: &Peer) -> Response {
             })
             .await
         }
-        Request::GetSettings => Ok(Response::Settings(e.settings())),
+        Request::GetSettings => Ok(Response::Settings(crate::settings::redacted(&e.settings()))),
         Request::UpdateSettings { settings } => {
             blocking(move || match e.update_settings(settings) {
-                Ok(s) => Response::Settings(s),
+                Ok(s) => Response::Settings(crate::settings::redacted(&s)),
                 Err(err) => Response::error(ErrorCode::Internal, format!("{err:#}")),
             })
             .await

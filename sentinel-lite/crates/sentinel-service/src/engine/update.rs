@@ -7,8 +7,10 @@
 //!   verifies against a public key compiled into this build
 //!   (`SENTINEL_UPDATE_PUBKEYS`, comma-separated hex) and its version is not
 //!   older than the last applied one (rollback protection).
-//! * **Community** (`settings.community_feeds`): abuse.ch MalwareBazaar's list of
-//!   recent sample hashes over HTTPS. Unsigned, so detections from it pass extra
+//! * **Community** (`settings.community_feeds`): abuse.ch MalwareBazaar's export
+//!   of recently submitted samples (CSV) over HTTPS. Since October 2026 abuse.ch
+//!   requires a free Auth-Key, placed in the URL path; the key is redacted from
+//!   every error and log line. Unsigned, so detections from it pass extra
 //!   safety checks before any remediation (see `Engine::may_remediate`).
 //!
 //! Hashes accumulate across updates; community hashes not seen for 180 days are pruned.
@@ -20,7 +22,9 @@ use sentinel_protocol::{Settings, Severity};
 use std::io::Read;
 use std::time::Duration;
 
-pub const MALWAREBAZAAR_RECENT: &str = "https://bazaar.abuse.ch/export/txt/sha256/recent/";
+/// `{key}` is replaced by the abuse.ch Auth-Key. abuse.ch refreshes this export
+/// every 5 minutes; we fetch at most hourly (`update_interval_hours` >= 1).
+pub const MALWAREBAZAAR_RECENT: &str = "https://mb-api.abuse.ch/v2/files/exports/{key}/recent.csv";
 const MAX_DOWNLOAD_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_COMMUNITY_HASHES: usize = 500_000;
 const COMMUNITY_MAX_AGE_SECS: i64 = 180 * 86_400;
@@ -33,18 +37,45 @@ pub struct Outcome {
     pub errors: Vec<String>,
 }
 
+/// Community channel configuration.
+pub enum Community {
+    Off,
+    /// Enabled, but no Auth-Key configured yet.
+    MissingKey,
+    /// URL to fetch, plus the secret to redact from errors.
+    Url {
+        url: String,
+        secret: Option<String>,
+    },
+}
+
 /// Where each channel fetches from (overridable in tests).
 pub struct Sources<'a> {
     pub official_url: Option<&'a str>,
-    pub community_url: Option<&'a str>,
+    pub community: Community,
 }
 
 impl<'a> Sources<'a> {
     pub fn from_settings(s: &'a Settings) -> Self {
+        let community = match (s.community_feeds, s.abusech_auth_key.as_deref()) {
+            (false, _) => Community::Off,
+            (true, None) => Community::MissingKey,
+            (true, Some(key)) => Community::Url {
+                url: MALWAREBAZAAR_RECENT.replace("{key}", key),
+                secret: Some(key.to_string()),
+            },
+        };
         Self {
             official_url: s.update_url.as_deref(),
-            community_url: s.community_feeds.then_some(MALWAREBAZAAR_RECENT),
+            community,
         }
+    }
+}
+
+fn redact(msg: String, secret: Option<&str>) -> String {
+    match secret {
+        Some(sec) if !sec.is_empty() => msg.replace(sec, "<auth-key>"),
+        _ => msg,
     }
 }
 
@@ -126,11 +157,16 @@ pub fn fetch(url: &str) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
-/// Lines that are exactly a SHA-256 (comments and junk ignored).
+/// Extract SHA-256 values from a plain list or a CSV export (first SHA-256
+/// field per row; `#` comment lines and headers ignored).
 pub fn parse_hash_list(text: &str) -> Vec<String> {
     text.lines()
-        .map(|l| l.trim().trim_matches('"').to_ascii_lowercase())
-        .filter(|l| signatures::is_sha256(l))
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .filter_map(|l| {
+            l.split(',')
+                .map(|f| f.trim().trim_matches('"').trim().to_ascii_lowercase())
+                .find(|f| signatures::is_sha256(f))
+        })
         .take(MAX_COMMUNITY_HASHES)
         .collect()
 }
@@ -199,16 +235,22 @@ pub fn run(db: &Database, sources: &Sources<'_>, keys: &[VerifyingKey]) -> Outco
             Err(e) => out.errors.push(format!("official: {e:#}")),
         }
     }
-    if let Some(url) = sources.community_url {
-        match apply_community(db, url) {
+    match &sources.community {
+        Community::Off => {}
+        Community::MissingKey => out.errors.push(
+            "MalwareBazaar: add your free abuse.ch Auth-Key in Settings > Updates to enable the community feed".into(),
+        ),
+        Community::Url { url, secret } => match apply_community(db, url) {
             Ok(n) => {
                 out.imported += n;
                 out.notes.push(format!("MalwareBazaar: {n} hashes"));
             }
-            Err(e) => out.errors.push(format!("MalwareBazaar: {e:#}")),
-        }
+            Err(e) => out
+                .errors
+                .push(redact(format!("MalwareBazaar: {e:#}"), secret.as_deref())),
+        },
     }
-    if sources.official_url.is_none() && sources.community_url.is_none() {
+    if sources.official_url.is_none() && matches!(sources.community, Community::Off) {
         out.notes.push("no update sources enabled".into());
     }
     out
@@ -275,7 +317,7 @@ mod tests {
             &db,
             &Sources {
                 official_url: Some(&format!("{base}/p.json")),
-                community_url: None,
+                community: Community::Off,
             },
             &keys,
         );
@@ -296,7 +338,7 @@ mod tests {
             &db,
             &Sources {
                 official_url: Some(&format!("{base}/p.json")),
-                community_url: None,
+                community: Community::Off,
             },
             &keys,
         );
@@ -324,7 +366,7 @@ mod tests {
             &db,
             &Sources {
                 official_url: Some(&format!("{base}/p.json")),
-                community_url: None,
+                community: Community::Off,
             },
             &[parse_key(&public).unwrap()],
         );
@@ -341,7 +383,7 @@ mod tests {
             &db,
             &Sources {
                 official_url: Some(&format!("{base}/p.json")),
-                community_url: None,
+                community: Community::Off,
             },
             &[parse_key(&other_public).unwrap()],
         );
@@ -351,7 +393,7 @@ mod tests {
             &db,
             &Sources {
                 official_url: Some("http://127.0.0.1:9/p.json"),
-                community_url: None,
+                community: Community::Off,
             },
             &[],
         );
@@ -360,40 +402,84 @@ mod tests {
     }
 
     #[test]
-    fn community_feed_imports_hashes_with_community_provenance() {
+    fn community_feed_parses_abusech_csv_export() {
         let db = Database::open_in_memory().unwrap();
+        // Shape of the abuse.ch v2 CSV export.
         let feed = format!(
-            "# MalwareBazaar recent\n# comment\n{}\nnot-a-hash\n{}\n",
+            "################\n# MalwareBazaar recent additions\n################\n\
+             # \"first_seen_utc\",\"sha256_hash\",\"md5_hash\",\"sha1_hash\"\n\
+             \"2026-11-07 00:01:02\", \"{}\", \"{}\", \"aa\"\n\
+             \"2026-11-07 00:01:03\", \"{}\", \"{}\", \"bb\"\nnot,a,hash\n",
             "1".repeat(64),
-            "2".repeat(64)
+            "c".repeat(32),
+            "2".repeat(64),
+            "d".repeat(32)
         );
-        let base = serve(vec![("/recent/", feed.into_bytes())], 1);
+        let base = serve(vec![("/v2/files/exports/KEY123/recent.csv", feed.into_bytes())], 1);
+        let community = Community::Url {
+            url: format!("{base}/v2/files/exports/KEY123/recent.csv"),
+            secret: Some("KEY123".into()),
+        };
         let out = run(
             &db,
             &Sources {
                 official_url: None,
-                community_url: Some(&format!("{base}/recent/")),
+                community,
             },
             &[],
         );
         assert_eq!(out.imported, 2, "{out:?}");
         assert!(db.lookup_hash(&"1".repeat(64)).unwrap().unwrap().is_community());
+        assert!(db.lookup_hash(&"c".repeat(64)).unwrap().is_none());
     }
 
     #[test]
     fn failing_channel_does_not_block_the_other() {
         let db = Database::open_in_memory().unwrap();
         let base = serve(vec![("/recent/", "3".repeat(64).into_bytes())], 1);
+        let community = Community::Url {
+            url: format!("{base}/recent/"),
+            secret: None,
+        };
         let out = run(
             &db,
             &Sources {
                 official_url: Some("https://127.0.0.1:1/never"),
-                community_url: Some(&format!("{base}/recent/")),
+                community,
             },
             &[],
         );
         assert_eq!(out.errors.len(), 1);
         assert_eq!(out.imported, 1);
+    }
+
+    #[test]
+    fn missing_key_is_reported_and_key_never_leaks_into_errors() {
+        let db = Database::open_in_memory().unwrap();
+        let s = Settings {
+            community_feeds: true,
+            abusech_auth_key: None,
+            ..Settings::default()
+        };
+        let out = run(&db, &Sources::from_settings(&s), &[]);
+        assert!(out.errors[0].contains("Auth-Key"), "{:?}", out.errors);
+
+        // Unreachable host: the error quotes the URL, which contains the key.
+        let community = Community::Url {
+            url: "http://127.0.0.1:1/v2/files/exports/SECRETKEY9/recent.csv".into(),
+            secret: Some("SECRETKEY9".into()),
+        };
+        let out = run(
+            &db,
+            &Sources {
+                official_url: None,
+                community,
+            },
+            &[],
+        );
+        assert_eq!(out.errors.len(), 1);
+        assert!(!out.errors[0].contains("SECRETKEY9"), "{}", out.errors[0]);
+        assert!(out.errors[0].contains("<auth-key>"));
     }
 
     #[test]

@@ -79,15 +79,21 @@ try {
     $settings.exclusions = @("C:\sentinel-smoke-excluded")
     $settings.auto_update = $false      # keep the footprint measurement below free of background work
     $settings.scheduled_scan = $false
+    if ($env:ABUSECH_AUTH_KEY) { $settings.abusech_auth_key = $env:ABUSECH_AUTH_KEY }
     $json = @{ type = "update_settings"; data = @{ settings = $settings } } | ConvertTo-Json -Depth 8 -Compress
     $hex = -join ([Text.Encoding]::UTF8.GetBytes($json) | ForEach-Object { $_.ToString("x2") })
     Invoke-Svc elevated-request $hex | Out-Host
     Wait-Until { (Invoke-Svc settings | Out-String | ConvertFrom-Json).data.exclusions -contains "C:\sentinel-smoke-excluded" } "elevated settings change applied"
 
-    # --- Live community feed (network-dependent: warn, do not fail) ----------------
-    $out = & $svc update 2>&1 | Out-String
-    if ($LASTEXITCODE -eq 0) { Write-Host "PASS: community feed update: $($out.Trim().Split("`n")[-1])" -ForegroundColor Green }
-    else { Write-Warning "community feed update failed (network?): $out" }
+    # --- Live community feed (needs the ABUSECH_AUTH_KEY secret) --------------------
+    if ($env:ABUSECH_AUTH_KEY) {
+        $out = & $svc update 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) { throw "FAIL: community feed update: $out" }
+        if ($out -match [regex]::Escape($env:ABUSECH_AUTH_KEY)) { throw "FAIL: Auth-Key leaked into output" }
+        Write-Host "PASS: community feed update: $($out.Trim().Split("`n")[-1])" -ForegroundColor Green
+    } else {
+        Write-Warning "ABUSECH_AUTH_KEY secret not set: skipping the live community-feed check"
+    }
 
     # --- Hardening ------------------------------------------------------------------
     $open = (Get-Acl $data).Access | Where-Object { $_.IdentityReference -match "\\Users$|Everyone|Authenticated Users" }

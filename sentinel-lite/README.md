@@ -84,7 +84,10 @@ Data lives in `%ProgramData%\SentinelLite\` (`sentinel.db`, `quarantine\`, `sign
 
 1. **Signatures.** SHA-256 of a file → SQLite lookup (allow-list checked first). Sources:
    the bundled pack, the **official signed channel** (Ed25519-verified, rollback-protected),
-   and the **community feed** (abuse.ch MalwareBazaar). Updates run every 6 h by default.
+   and the **community feed** (abuse.ch MalwareBazaar recent samples). Updates run every 6 h by default.
+   Since October 2026 abuse.ch requires a free **Auth-Key** (https://auth.abuse.ch/): enter it in
+   Settings → Updates & schedule. Until then the dashboard shows that the feed needs a key. The key is
+   masked in the UI and redacted from logs. Check abuse.ch's terms: commercial use may need an agreement with them.
    A `(path, size, mtime) → hash` cache makes re-scans of unchanged files nearly free.
 2. **Process Guard.** ETW `Microsoft-Windows-Kernel-Process` ProcessStart → hash the image →
    on a match, `TerminateProcess` + quarantine. Falls back to 1 s Toolhelp polling if ETW

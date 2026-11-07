@@ -13,6 +13,8 @@ pub const PIPE_NAME: &str = r"\\.\pipe\sentinel_lite_ipc";
 pub const MAX_FRAME_BYTES: u32 = 4 * 1024 * 1024;
 /// Bumped on any incompatible change; the UI refuses to talk to a different version.
 pub const PROTOCOL_VERSION: u32 = 2;
+/// Placeholder sent instead of stored secrets; sending it back means "unchanged".
+pub const SECRET_MASK: &str = "********";
 
 // ---------------------------------------------------------------------------
 // Domain types
@@ -156,6 +158,9 @@ pub struct Settings {
     /// Also import hashes from public community feeds (abuse.ch MalwareBazaar).
     /// These are unsigned, so validly code-signed files they match are reported, not quarantined.
     pub community_feeds: bool,
+    /// abuse.ch Auth-Key (free, https://auth.abuse.ch/), required by MalwareBazaar exports.
+    /// The service never sends the real value to clients: it is replaced by [`SECRET_MASK`].
+    pub abusech_auth_key: Option<String>,
     /// Official, Ed25519-signed pack URL (`<url>` + `<url>.sig`). Ignored unless the
     /// build embeds a trusted public key.
     pub update_url: Option<String>,
@@ -182,6 +187,7 @@ impl Default for Settings {
             auto_update: true,
             update_interval_hours: 6,
             community_feeds: true,
+            abusech_auth_key: None,
             update_url: None,
             scheduled_scan: true,
             scheduled_scan_hours: 24,

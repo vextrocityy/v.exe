@@ -110,7 +110,7 @@ impl Engine {
 
     /// Validate, persist and apply new settings (restarts the real-time shields).
     pub fn update_settings(self: &Arc<Self>, new: Settings) -> Result<Settings> {
-        let new = settings::sanitize(new);
+        let new = settings::merge_secrets(&self.settings(), settings::sanitize(new));
         settings::save(&self.paths.settings, &new)?;
         *self.settings.write().unwrap_or_else(|e| e.into_inner()) = new.clone();
         self.emit(

@@ -28,6 +28,9 @@ jobs:
       - run: cargo build --locked --release -p sentinel-service
       - name: End-to-end smoke test (installs the real service)
         shell: pwsh
+        env:
+          # Optional repository secret; without it the live community-feed check is skipped.
+          ABUSECH_AUTH_KEY: ${{ secrets.ABUSECH_AUTH_KEY }}
         run: ./scripts/smoke-test.ps1
       - uses: actions/upload-artifact@v4
         with:
@@ -75,13 +78,16 @@ jobs:
           # A client outside the install directory must be refused.
           $rogue = Join-Path $env:TEMP "rogue-client.exe"
           Copy-Item "$dir\sentinel-service.exe" $rogue
-          & $rogue status 2>&1 | Out-String | Tee-Object -Variable out
+          $out = & $rogue status 2>&1 | Out-String
           if ($LASTEXITCODE -eq 0) { throw "untrusted client was allowed to connect" }
+          if ($out -notmatch "not a trusted Sentinel-Lite component") { throw "unexpected refusal: $out" }
+          "Untrusted client refused as expected"
           if (-not (Get-ItemProperty "HKLM:\Software\Microsoft\Windows\CurrentVersion\Run")."Sentinel-Lite") { throw "autostart entry missing" }
           Start-Process "$dir\uninstall.exe" -ArgumentList "/S" -Wait
           Start-Sleep 10
           if (Get-Service SentinelLite -ErrorAction SilentlyContinue) { throw "service still registered after uninstall" }
           "Install / verify / uninstall OK"
+          exit 0   # the refused-client check above leaves a non-zero $LASTEXITCODE by design
       - uses: actions/upload-artifact@v4
         with:
           name: sentinel-lite-installer

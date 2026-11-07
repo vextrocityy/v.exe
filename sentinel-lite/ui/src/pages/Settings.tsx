@@ -94,9 +94,25 @@ export function SettingsPage() {
         <Row label="Update interval (hours)" hint="How often to check for new signatures.">
           <NumberInput value={s.update_interval_hours} min={1} max={168} onChange={(v) => set("update_interval_hours", v)} />
         </Row>
-        <Row label="Community threat feed" hint="Add malware hashes from abuse.ch MalwareBazaar. Code-signed and Windows files matched only by this feed are reported, never quarantined.">
+        <Row label="Community threat feed" hint="Add hashes of recently submitted malware from abuse.ch MalwareBazaar. Code-signed and Windows files matched only by this feed are reported, never quarantined.">
           <Toggle label="Community threat feed" checked={s.community_feeds} onChange={(v) => set("community_feeds", v)} />
         </Row>
+        <div className="border-b border-slate-800/70 px-5 py-4">
+          <label htmlFor="abusech-key" className="text-sm text-slate-200">abuse.ch Auth-Key</label>
+          <p className="text-xs text-slate-500">
+            Required by the community feed. Get a free key at auth.abuse.ch. Check abuse.ch's terms before commercial use. Stored by the service and never shown again.
+          </p>
+          <input
+            id="abusech-key"
+            type="password"
+            autoComplete="off"
+            spellCheck={false}
+            value={s.abusech_auth_key ?? ""}
+            onChange={(e) => set("abusech_auth_key", e.target.value.trim() === "" ? null : e.target.value.trim())}
+            placeholder={s.community_feeds ? "Paste your key to enable the community feed" : "Community feed is off"}
+            className="mt-2 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-sm text-slate-200 placeholder:text-slate-600 focus:border-cyan-500 focus:outline-none"
+          />
+        </div>
         <Row label="Scheduled quick scan" hint="Run a low-priority quick scan in the background.">
           <Toggle label="Scheduled quick scan" checked={s.scheduled_scan} onChange={(v) => set("scheduled_scan", v)} />
         </Row>

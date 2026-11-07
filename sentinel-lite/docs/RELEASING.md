@@ -17,6 +17,14 @@ sentinel-service keygen
 
 Builds without a key still work; they just ignore the official channel (community feed only).
 
+## 1b. Community feed key (abuse.ch)
+
+The MalwareBazaar export needs an abuse.ch Auth-Key. Each installation can enter its own key in
+Settings, or you can pre-seed `abusech_auth_key` in `%ProgramData%\SentinelLite\settings.json`
+through your deployment tooling. **Before shipping a product that uses the feed commercially,
+confirm abuse.ch's terms**: their API documentation says commercial use may require an enhanced
+agreement. Add the key as the `ABUSECH_AUTH_KEY` repository secret to enable the live feed check in CI.
+
 ## 2. Publishing a signature pack
 
 ```powershell

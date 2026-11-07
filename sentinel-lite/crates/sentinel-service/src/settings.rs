@@ -44,6 +44,11 @@ pub fn sanitize(mut s: Settings) -> Settings {
         .take()
         .map(|u| u.trim().to_string())
         .filter(|u| is_allowed_update_url(u));
+    // abuse.ch keys are alphanumeric; anything else is dropped rather than put into a URL.
+    s.abusech_auth_key = s.abusech_auth_key.take().map(|k| k.trim().to_string()).filter(|k| {
+        k == sentinel_protocol::SECRET_MASK
+            || (!k.is_empty() && k.len() <= 128 && k.chars().all(|c| c.is_ascii_alphanumeric()))
+    });
     clean(&mut s.exclusions);
     clean(&mut s.watch_paths);
     // Excluding a whole drive root is almost certainly a mistake (or an attack).
@@ -52,6 +57,23 @@ pub fn sanitize(mut s: Settings) -> Settings {
         !(t.is_empty() || (t.len() == 2 && t.ends_with(':')))
     });
     s
+}
+
+/// Copy of `s` safe to hand to a client: secrets replaced by the mask.
+pub fn redacted(s: &Settings) -> Settings {
+    let mut out = s.clone();
+    if out.abusech_auth_key.is_some() {
+        out.abusech_auth_key = Some(sentinel_protocol::SECRET_MASK.into());
+    }
+    out
+}
+
+/// A client echoing the mask back keeps the stored secret.
+pub fn merge_secrets(old: &Settings, mut new: Settings) -> Settings {
+    if new.abusech_auth_key.as_deref() == Some(sentinel_protocol::SECRET_MASK) {
+        new.abusech_auth_key = old.abusech_auth_key.clone();
+    }
+    new
 }
 
 /// Updates must come over HTTPS (plain HTTP only for a local mirror / tests).
@@ -143,6 +165,33 @@ mod tests {
             },
         );
         assert_eq!(w.len(), 2, "{w:?}");
+    }
+
+    #[test]
+    fn secrets_are_masked_and_preserved() {
+        let stored = Settings {
+            abusech_auth_key: Some("abc123".into()),
+            ..Settings::default()
+        };
+        let shown = redacted(&stored);
+        assert_eq!(shown.abusech_auth_key.as_deref(), Some(sentinel_protocol::SECRET_MASK));
+        assert_eq!(
+            merge_secrets(&stored, sanitize(shown)).abusech_auth_key.as_deref(),
+            Some("abc123")
+        );
+        let cleared = merge_secrets(
+            &stored,
+            Settings {
+                abusech_auth_key: None,
+                ..Settings::default()
+            },
+        );
+        assert_eq!(cleared.abusech_auth_key, None);
+        let bad = sanitize(Settings {
+            abusech_auth_key: Some("../evil?x=1".into()),
+            ..Settings::default()
+        });
+        assert_eq!(bad.abusech_auth_key, None);
     }
 
     #[test]

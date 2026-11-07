@@ -23,6 +23,7 @@ const settings: Settings = {
   auto_update: true,
   update_interval_hours: 6,
   community_feeds: true,
+  abusech_auth_key: null,
   update_url: null,
   scheduled_scan: true,
   scheduled_scan_hours: 24,
