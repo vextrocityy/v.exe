@@ -121,6 +121,21 @@ export function SettingsPage() {
         </Row>
       </Panel>
 
+      <Panel title="YARA rules">
+        <Row label="YARA scanning" hint="Scan executables, scripts, shortcuts and documents with rules that recognise malware families and their new variants.">
+          <Toggle label="YARA scanning" checked={s.yara_enabled} onChange={(v) => set("yara_enabled", v)} />
+        </Row>
+        <Row label="YARA Forge rule feed" hint="Download the curated YARA Forge core package (about 5,000 rules) with each update.">
+          <Toggle label="YARA Forge rule feed" checked={s.yara_rules_feed} disabled={!s.yara_enabled} onChange={(v) => set("yara_rules_feed", v)} />
+        </Row>
+        <Row label="Quarantine threshold" hint="Rule score (0-100) needed to quarantine automatically. Lower-scoring matches are reported for review. 101 = never quarantine.">
+          <NumberInput value={s.yara_min_remediate_score} min={50} max={101} onChange={(v) => set("yara_min_remediate_score", v)} />
+        </Row>
+        <Row label="Max YARA file size (MB)" hint="Larger files are still hash-checked, but not YARA-scanned.">
+          <NumberInput value={s.yara_max_file_mb} min={1} max={256} onChange={(v) => set("yara_max_file_mb", v)} />
+        </Row>
+      </Panel>
+
       <Panel title="Exclusions">
         <div className="space-y-3 p-5">
           <p className="text-xs text-slate-500">Files and folders whose path starts with one of these are never scanned. Whole drives cannot be excluded.</p>

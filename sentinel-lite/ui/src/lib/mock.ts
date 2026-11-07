@@ -27,6 +27,10 @@ const settings: Settings = {
   update_url: null,
   scheduled_scan: true,
   scheduled_scan_hours: 24,
+  yara_enabled: true,
+  yara_rules_feed: true,
+  yara_min_remediate_score: 75,
+  yara_max_file_mb: 32,
 };
 let lastUpdate = now() - 3 * 3600;
 let updating = false;
@@ -71,6 +75,7 @@ function status(): EngineStatus {
       { name: "File Shield", enabled: settings.file_monitor, running: settings.realtime_protection && settings.file_monitor, detail: "Watching 9 folder(s)" },
       { name: "Persistence Watch", enabled: settings.persistence_monitor, running: settings.realtime_protection && settings.persistence_monitor, detail: "Checking autostart locations every 30 s" },
       { name: "Behavior Engine", enabled: settings.behavior_monitor, running: settings.realtime_protection && settings.behavior_monitor, detail: "Process lineage + mass file-modification detection" },
+      { name: "YARA Rules", enabled: settings.yara_enabled, running: settings.yara_enabled, detail: "5134 rules (precompiled)" },
     ],
     signature_count: 48213,
     threats_blocked_total: 3,
@@ -81,6 +86,7 @@ function status(): EngineStatus {
     last_signature_update: lastUpdate,
     signature_update_error: null,
     update_in_progress: updating,
+    yara_rule_count: settings.yara_enabled ? 5134 : 0,
   };
 }
 

@@ -43,6 +43,7 @@ export interface EngineStatus {
   last_signature_update: number | null;
   signature_update_error: string | null;
   update_in_progress: boolean;
+  yara_rule_count: number;
 }
 
 export type EventKind =
@@ -100,6 +101,10 @@ export interface Settings {
   update_url: string | null;
   scheduled_scan: boolean;
   scheduled_scan_hours: number;
+  yara_enabled: boolean;
+  yara_rules_feed: boolean;
+  yara_min_remediate_score: number;
+  yara_max_file_mb: number;
 }
 
 export type StateTone = "safe" | "warn" | "danger";

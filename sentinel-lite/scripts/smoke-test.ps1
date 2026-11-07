@@ -61,6 +61,12 @@ try {
     Copy-Item $payload $dropped
     Wait-Until { -not (Test-Path $dropped) -and (Status).quarantine_count -ge 1 } "File Shield quarantined a file dropped in Downloads"
 
+    # --- YARA (bundled self-test rule, via File Shield) -----------------------------
+    Wait-Until { (Status).yara_rule_count -ge 1 } "YARA rules loaded"
+    $script = Join-Path $downloads "smoke-yara.ps1"
+    Set-Content $script "Write-Host 'hello'`n# SENTINEL-LITE-YARA-TEST-MARKER-7f3c9a" -Encoding ascii
+    Wait-Until { -not (Test-Path $script) -and (Events | Where-Object { $_.title -like "YARA.Sentinel_SelfTest_Marker*" }) } "YARA rule match quarantined by File Shield"
+
     # --- Process Guard --------------------------------------------------------------
     Start-Process $procExe -ArgumentList "-n", "60", "127.0.0.1" -WindowStyle Hidden
     Wait-Until { Events | Where-Object { $_.title -like "*Smoke.Process*" } } "Process Guard detected the process at launch"
@@ -85,10 +91,27 @@ try {
     Invoke-Svc elevated-request $hex | Out-Host
     Wait-Until { (Invoke-Svc settings | Out-String | ConvertFrom-Json).data.exclusions -contains "C:\sentinel-smoke-excluded" } "elevated settings change applied"
 
+    # --- YARA Forge feed: download, validate, compile; restart to load ----------------
+    $out = & $svc update 2>&1 | Out-String
+    if ($out -notmatch "YARA rules (updated|already current)") { throw "FAIL: YARA Forge feed update: $out" }
+    Write-Host "PASS: YARA Forge rules downloaded and compiled" -ForegroundColor Green
+    Invoke-Svc stop | Out-Host
+    Invoke-Svc start | Out-Host
+    Wait-Until { (Status).yara_rule_count -gt 1000 } "service loaded the full YARA rule set ($((Status).yara_rule_count) rules)" 120
+
+    # --- False-positive survey: YARA Forge vs. clean Windows binaries (report only) --
+    $fpDir = Join-Path $work "fp"; New-Item -ItemType Directory -Force $fpDir | Out-Null
+    Get-ChildItem "$env:SystemRoot\System32\*.exe" | Select-Object -First 400 | Copy-Item -Destination $fpDir -ErrorAction SilentlyContinue
+    $survey = & $svc yara-check "$data\rules\feeds" $fpDir 2>&1 | Out-String
+    $survey.Trim().Split("`n") | Select-Object -Last 15 | Out-Host
+    $fp = ([regex]::Matches($survey, "(?m)^MATCH ")).Count
+    if ($fp -gt 0) { Write-Host "::warning::YARA Forge matched $fp clean System32 executable(s); these are never auto-quarantined (system/signed gate), review the rules above" }
+    else { Write-Host "PASS: no YARA matches on clean System32 executables" -ForegroundColor Green }
+
     # --- Live community feed (needs the ABUSECH_AUTH_KEY secret) --------------------
     if ($env:ABUSECH_AUTH_KEY) {
         $out = & $svc update 2>&1 | Out-String
-        if ($LASTEXITCODE -ne 0) { throw "FAIL: community feed update: $out" }
+        if ($out -notmatch "MalwareBazaar: \d+ hashes") { throw "FAIL: community feed update: $out" }
         if ($out -match [regex]::Escape($env:ABUSECH_AUTH_KEY)) { throw "FAIL: Auth-Key leaked into output" }
         Write-Host "PASS: community feed update: $($out.Trim().Split("`n")[-1])" -ForegroundColor Green
     } else {

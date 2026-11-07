@@ -92,6 +92,9 @@ pub struct EngineStatus {
     pub signature_update_error: Option<String>,
     #[serde(default)]
     pub update_in_progress: bool,
+    /// Compiled YARA rules currently active.
+    #[serde(default)]
+    pub yara_rule_count: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -166,6 +169,14 @@ pub struct Settings {
     pub update_url: Option<String>,
     pub scheduled_scan: bool,
     pub scheduled_scan_hours: u64,
+    /// Scan executables, scripts and documents with YARA rules (catches variants no hash list knows).
+    pub yara_enabled: bool,
+    /// Download the curated YARA Forge "core" rule package with signature updates.
+    pub yara_rules_feed: bool,
+    /// YARA matches at or above this rule score (0-100) may be quarantined; lower scores only alert.
+    pub yara_min_remediate_score: u32,
+    /// Larger files are not YARA-scanned (hash checks still apply).
+    pub yara_max_file_mb: u64,
 }
 
 impl Default for Settings {
@@ -191,6 +202,10 @@ impl Default for Settings {
             update_url: None,
             scheduled_scan: true,
             scheduled_scan_hours: 24,
+            yara_enabled: true,
+            yara_rules_feed: true,
+            yara_min_remediate_score: 75,
+            yara_max_file_mb: 32,
         }
     }
 }

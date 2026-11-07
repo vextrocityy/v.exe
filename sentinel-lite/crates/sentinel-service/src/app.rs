@@ -89,6 +89,15 @@ pub async fn run(paths: AppPaths, shutdown: impl std::future::Future<Output = ()
         tokio::task::spawn_blocking(move || e.start_realtime()).await?;
     }
     engine.start_scheduler();
+    {
+        // Compile/load YARA rules off the startup path; shields work meanwhile with hashes.
+        let e = engine.clone();
+        std::thread::Builder::new().name("yara-load".into()).spawn(move || {
+            if e.settings().yara_enabled {
+                let _ = e.reload_yara();
+            }
+        })?;
+    }
     engine.emit(
         EventKind::ServiceInfo,
         Severity::Info,

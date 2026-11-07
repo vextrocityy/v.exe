@@ -67,7 +67,7 @@ jobs:
           $installer = Get-ChildItem target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
           Start-Process $installer.FullName -ArgumentList "/S" -Wait
           $dir = "C:\Program Files\Sentinel-Lite"
-          foreach ($f in "sentinel-lite.exe", "sentinel-service.exe", "signatures\core.json") {
+          foreach ($f in "sentinel-lite.exe", "sentinel-service.exe", "signatures\core.json", "rules\sentinel-test.yar") {
             if (-not (Test-Path "$dir\$f")) { throw "missing $f" }
           }
           $svc = Get-Service SentinelLite
@@ -75,6 +75,11 @@ jobs:
           $status = (& "$dir\sentinel-service.exe" status | Out-String | ConvertFrom-Json).data
           "State: $($status.state | ConvertTo-Json -Compress)  signatures: $($status.signature_count)"
           if ($status.signature_count -lt 2) { throw "bundled signatures not loaded" }
+          $deadline = (Get-Date).AddSeconds(60)
+          while ((Get-Date) -lt $deadline -and ((& "$dir\sentinel-service.exe" status | Out-String | ConvertFrom-Json).data.yara_rule_count -lt 1)) { Start-Sleep 1 }
+          $yara = (& "$dir\sentinel-service.exe" status | Out-String | ConvertFrom-Json).data.yara_rule_count
+          if ($yara -lt 1) { throw "bundled YARA rules not loaded" }
+          "YARA rules loaded: $yara"
           # A client outside the install directory must be refused.
           $rogue = Join-Path $env:TEMP "rogue-client.exe"
           Copy-Item "$dir\sentinel-service.exe" $rogue

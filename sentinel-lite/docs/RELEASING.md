@@ -25,6 +25,21 @@ through your deployment tooling. **Before shipping a product that uses the feed 
 confirm abuse.ch's terms**: their API documentation says commercial use may require an enhanced
 agreement. Add the key as the `ABUSECH_AUTH_KEY` repository secret to enable the live feed check in CI.
 
+## 1c. YARA rules and licensing
+
+Installations download the **YARA Forge "core"** package
+(`github.com/YARAHQ/yara-forge` releases) at runtime; the installer itself only ships the harmless
+self-test rule in `rules/sentinel-test.yar`. Forge aggregates rules from many authors under their
+own licenses (each rule's `license` meta): mostly **CC BY-SA 4.0** and the **Detection Rule License 1.1**,
+plus Volexity's own license, Apache-2.0, BSD-2-Clause, MIT and others; some rules carry no license field.
+**Before selling the product, have the licenses reviewed** (attribution requirements, and whether any
+source restricts commercial use). If needed, point the feed at a Forge package you filter yourself, or
+ship your own signed rule set.
+
+To add private rules, drop `.yar` files into `%ProgramData%\SentinelLite\rules\` (administrators
+only) and restart the service, or wait for the next update. Use `sentinel-service yara-check <dir> [path]`
+to compile-check rules and test them against sample files before deploying.
+
 ## 2. Publishing a signature pack
 
 ```powershell

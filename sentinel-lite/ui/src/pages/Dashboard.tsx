@@ -15,7 +15,8 @@ function signatureHint(status: EngineStatus | null): { text: string; warn: boole
   if (status.signature_update_error && !status.last_signature_update) return { text: "Update failed: " + status.signature_update_error, warn: true };
   if (!status.last_signature_update) return { text: "Never updated", warn: true };
   const stale = Date.now() / 1000 - status.last_signature_update > 3 * 86400;
-  return { text: `Updated ${timeAgo(status.last_signature_update)}`, warn: stale };
+  const yara = status.yara_rule_count ? ` · ${formatNumber(status.yara_rule_count)} YARA rules` : "";
+  return { text: `Updated ${timeAgo(status.last_signature_update)}${yara}`, warn: stale };
 }
 
 export function Dashboard({ status, events, refresh, onSeeAll }: { status: EngineStatus | null; events: SecurityEvent[]; refresh: () => Promise<void>; onSeeAll: () => void }) {

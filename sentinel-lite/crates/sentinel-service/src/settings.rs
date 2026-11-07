@@ -49,6 +49,8 @@ pub fn sanitize(mut s: Settings) -> Settings {
         k == sentinel_protocol::SECRET_MASK
             || (!k.is_empty() && k.len() <= 128 && k.chars().all(|c| c.is_ascii_alphanumeric()))
     });
+    s.yara_min_remediate_score = s.yara_min_remediate_score.clamp(50, 101); // 101 = never quarantine
+    s.yara_max_file_mb = s.yara_max_file_mb.clamp(1, 256);
     clean(&mut s.exclusions);
     clean(&mut s.watch_paths);
     // Excluding a whole drive root is almost certainly a mistake (or an attack).
@@ -86,7 +88,7 @@ pub fn is_allowed_update_url(u: &str) -> bool {
 /// Empty = the change is neutral or strengthening and needs no elevation.
 pub fn weakenings(old: &Settings, new: &Settings) -> Vec<String> {
     let mut out = Vec::new();
-    let flags: [(&str, bool, bool); 9] = [
+    let flags: [(&str, bool, bool); 11] = [
         ("real-time protection", old.realtime_protection, new.realtime_protection),
         ("Process Guard", old.process_monitor, new.process_monitor),
         ("File Shield", old.file_monitor, new.file_monitor),
@@ -100,6 +102,8 @@ pub fn weakenings(old: &Settings, new: &Settings) -> Vec<String> {
         ("automatic quarantine", old.auto_quarantine, new.auto_quarantine),
         ("automatic updates", old.auto_update, new.auto_update),
         ("community threat feeds", old.community_feeds, new.community_feeds),
+        ("YARA scanning", old.yara_enabled, new.yara_enabled),
+        ("the YARA rules feed", old.yara_rules_feed, new.yara_rules_feed),
     ];
     for (name, before, after) in flags {
         if before && !after {
@@ -109,6 +113,12 @@ pub fn weakenings(old: &Settings, new: &Settings) -> Vec<String> {
     let added: Vec<&String> = new.exclusions.iter().filter(|e| !old.exclusions.contains(e)).collect();
     if !added.is_empty() {
         out.push(format!("adds {} exclusion(s)", added.len()));
+    }
+    if new.yara_min_remediate_score > old.yara_min_remediate_score {
+        out.push("raises the YARA quarantine threshold".into());
+    }
+    if new.yara_max_file_mb < old.yara_max_file_mb {
+        out.push("lowers the maximum YARA-scanned file size".into());
     }
     if new.max_file_size_mb < old.max_file_size_mb {
         out.push("lowers the maximum scanned file size".into());

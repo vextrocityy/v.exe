@@ -25,6 +25,10 @@ use std::time::Duration;
 /// `{key}` is replaced by the abuse.ch Auth-Key. abuse.ch refreshes this export
 /// every 5 minutes; we fetch at most hourly (`update_interval_hours` >= 1).
 pub const MALWAREBAZAAR_RECENT: &str = "https://mb-api.abuse.ch/v2/files/exports/{key}/recent.csv";
+/// Curated YARA rule package (YARA Forge "core": quality- and score-filtered,
+/// performance-tested). Rules carry their own licenses (CC BY-SA 4.0, DRL 1.1, …).
+pub const YARA_FORGE_CORE: &str =
+    "https://github.com/YARAHQ/yara-forge/releases/latest/download/yara-forge-rules-core.zip";
 const MAX_DOWNLOAD_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_COMMUNITY_HASHES: usize = 500_000;
 const COMMUNITY_MAX_AGE_SECS: i64 = 180 * 86_400;
@@ -155,6 +159,25 @@ pub fn fetch(url: &str) -> Result<Vec<u8>> {
         "download exceeds {MAX_DOWNLOAD_BYTES} bytes"
     );
     Ok(buf)
+}
+
+/// Download a rule package zip and return the contents of its `.yar` file.
+/// Entry names are never used as paths (no extraction to disk), and the
+/// uncompressed size is capped (zip-bomb protection).
+pub fn fetch_yara_zip(url: &str) -> Result<Vec<u8>> {
+    let zip_bytes = fetch(url)?;
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip_bytes)).context("rule package is not a zip")?;
+    for i in 0..archive.len() {
+        let entry = archive.by_index(i)?;
+        let name = entry.name().to_ascii_lowercase();
+        if entry.is_file() && (name.ends_with(".yar") || name.ends_with(".yara")) {
+            let mut out = Vec::new();
+            entry.take(MAX_DOWNLOAD_BYTES + 1).read_to_end(&mut out)?;
+            anyhow::ensure!(out.len() as u64 <= MAX_DOWNLOAD_BYTES, "rule file too large");
+            return Ok(out);
+        }
+    }
+    bail!("no .yar file in rule package")
 }
 
 /// Extract SHA-256 values from a plain list or a CSV export (first SHA-256
@@ -480,6 +503,25 @@ mod tests {
         assert_eq!(out.errors.len(), 1);
         assert!(!out.errors[0].contains("SECRETKEY9"), "{}", out.errors[0]);
         assert!(out.errors[0].contains("<auth-key>"));
+    }
+
+    #[test]
+    fn yara_zip_is_unpacked_in_memory() {
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut z = zip::ZipWriter::new(&mut buf);
+            let opts = zip::write::SimpleFileOptions::default();
+            z.add_directory("packages/core/", opts).unwrap();
+            z.start_file("../../evil/packages/core/rules.yar", opts).unwrap(); // hostile name is harmless
+            z.write_all(b"rule a { condition: true }").unwrap();
+            z.finish().unwrap();
+        }
+        let base = serve(vec![("/core.zip", buf.into_inner())], 1);
+        let rules = fetch_yara_zip(&format!("{base}/core.zip")).unwrap();
+        assert_eq!(rules, b"rule a { condition: true }");
+
+        let base = serve(vec![("/core.zip", b"not a zip".to_vec())], 1);
+        assert!(fetch_yara_zip(&format!("{base}/core.zip")).is_err());
     }
 
     #[test]

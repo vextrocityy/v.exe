@@ -20,6 +20,10 @@ pub struct Database {
 pub struct SignatureHit {
     pub name: String,
     pub severity: Severity,
+    /// YARA rule score (0-100); `None` for hash signatures.
+    pub score: Option<u32>,
+    /// Rule description, when the detection came from YARA.
+    pub description: Option<String>,
     /// Where the hash came from, e.g. `core@2026.11.06`, `official@…`, `community:malwarebazaar`.
     pub source: String,
 }
@@ -29,7 +33,13 @@ impl SignatureHit {
     pub fn is_community(&self) -> bool {
         self.source.starts_with(COMMUNITY_PREFIX)
     }
+
+    pub fn is_yara(&self) -> bool {
+        self.source.starts_with(YARA_PREFIX)
+    }
 }
+
+pub const YARA_PREFIX: &str = "yara:";
 
 pub const COMMUNITY_PREFIX: &str = "community:";
 
@@ -97,7 +107,17 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE signatures ADD COLUMN added_at INTEGER NOT NULL DEFAULT 0;
      CREATE INDEX IF NOT EXISTS signatures_source ON signatures(source);
      CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;",
+    // 3: YARA verdict cache, keyed by content hash + rule-set version
+    "CREATE TABLE IF NOT EXISTS yara_cache (
+        sha256  TEXT PRIMARY KEY,
+        ruleset TEXT NOT NULL,
+        rule    TEXT,
+        score   INTEGER
+     ) WITHOUT ROWID;",
 ];
+
+/// A cached YARA verdict: `None` = scanned clean.
+pub type YaraVerdict = Option<(String, u32, Option<String>)>;
 
 /// Keep the journal bounded so the DB does not grow forever.
 const MAX_EVENTS: i64 = 20_000;
@@ -221,6 +241,8 @@ impl Database {
             name,
             severity: enum_from(&sev).unwrap_or(Severity::High),
             source,
+            score: None,
+            description: None,
         }))
     }
 
@@ -437,6 +459,53 @@ impl Database {
         self.counter(name)
     }
 
+    /// `Some(verdict)` if this content was already YARA-scanned with `ruleset`.
+    pub fn yara_cached(&self, sha256: &str, ruleset: &str) -> Option<YaraVerdict> {
+        self.conn()
+            .query_row(
+                "SELECT rule, score FROM yara_cache WHERE sha256 = ?1 AND ruleset = ?2",
+                params![sha256, ruleset],
+                |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<i64>>(1)?)),
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .map(|(rule, score)| {
+                rule.map(|rule| {
+                    // stored as "namespace:rule\tdescription"
+                    let (id, desc) = match rule.split_once('\t') {
+                        Some((a, b)) => (a.to_string(), Some(b.to_string())),
+                        None => (rule, None),
+                    };
+                    (id, score.unwrap_or(0) as u32, desc)
+                })
+            })
+    }
+
+    pub fn store_yara(&self, sha256: &str, ruleset: &str, verdict: &YaraVerdict) {
+        let (rule, score) = match verdict {
+            Some((id, score, desc)) => (
+                Some(match desc {
+                    Some(d) => format!("{id}\t{d}"),
+                    None => id.clone(),
+                }),
+                Some(*score as i64),
+            ),
+            None => (None, None),
+        };
+        let _ = self.conn().execute(
+            "INSERT OR REPLACE INTO yara_cache (sha256, ruleset, rule, score) VALUES (?1, ?2, ?3, ?4)",
+            params![sha256, ruleset, rule, score],
+        );
+    }
+
+    /// Drop verdicts made with older rule sets.
+    pub fn prune_yara_cache(&self, current_ruleset: &str) {
+        let _ = self
+            .conn()
+            .execute("DELETE FROM yara_cache WHERE ruleset != ?1", [current_ruleset]);
+    }
+
     pub fn set_counter(&self, name: &str, value: i64) {
         let _ = self.conn().execute(
             "INSERT INTO counters (name, value) VALUES (?1, ?2)
@@ -537,6 +606,21 @@ mod tests {
         let (db, rebuilt) = Database::open_or_recover(&p).unwrap();
         assert!(rebuilt);
         assert_eq!(db.signature_count(), 0);
+    }
+
+    #[test]
+    fn yara_cache_roundtrip_and_prune() {
+        let db = Database::open_in_memory().unwrap();
+        db.store_yara("h1", "v1", &Some(("ns:Rule".into(), 80, Some("desc".into()))));
+        db.store_yara("h2", "v1", &None);
+        assert_eq!(
+            db.yara_cached("h1", "v1"),
+            Some(Some(("ns:Rule".into(), 80, Some("desc".into()))))
+        );
+        assert_eq!(db.yara_cached("h2", "v1"), Some(None));
+        assert_eq!(db.yara_cached("h1", "v2"), None, "new rule set invalidates");
+        db.prune_yara_cache("v2");
+        assert_eq!(db.yara_cached("h2", "v1"), None);
     }
 
     #[test]

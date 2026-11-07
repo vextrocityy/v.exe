@@ -13,6 +13,7 @@ what it does.
 - [x] Scheduled quick scans; per-event panic containment; SCM restart on failure
 - [x] Corrupt-database recovery, schema migrations, rotating logs
 - [x] Installer (NSIS, per-machine) that installs, upgrades and removes the service; tray app with notifications
+- [x] YARA scanning (YARA-X) with the YARA Forge core package, score-based remediation, verdict cache, child-process compilation
 - [x] Windows CI: real service install + ETW/File Shield/Process Guard/elevation smoke test + installer install/uninstall
 
 ## Known limitations
@@ -22,14 +23,15 @@ what it does.
 | Pre-execution blocking | Processes are checked *as* they start (ETW), then killed | Malware gets milliseconds of execution. True blocking needs a kernel callback. |
 | File writes | Seen after the fact (`ReadDirectoryChangesW`), no writer PID | Ransomware alerts cannot name or stop the process yet. |
 | Tamper protection | An administrator (or malware running as one) can stop the service | Needs a protected process (ELAM + PPL). |
-| Detection breadth | Hashes + behavioural rules | No YARA/static analysis, no AMSI script inspection, no cloud reputation: novel malware is not detected by signatures. |
+| Detection breadth | Hashes + YARA rules + behavioural rules | Variants of known families are caught; genuinely novel malware that no rule describes, fileless/in-memory attacks and obfuscated scripts (no AMSI yet) are not. No cloud reputation. |
 | Official signature content | The channel and signing exist, but there is no threat-research team producing packs | The community feed is the only real-world source out of the box. |
 | Catalog-signed files | Authenticode check reads embedded signatures only | Mitigated by the `%SystemRoot%` rule for community hashes. |
 | Code signing | Not configured (needs your certificate) | See docs/RELEASING.md. |
 
 ## Phase 2: next user-mode steps
 
-- [ ] **YARA scanning** of new executables via `yara-x`, rule packs signed like signatures.
+- [ ] Signed official YARA rule packs (same Ed25519 channel as hash packs).
+- [ ] YARA scanning of process memory for running processes (catches packed / fileless payloads).
 - [ ] **AMSI provider** DLL so PowerShell/VBScript/JScript content is inspected after de-obfuscation.
 - [ ] **ETW file I/O + network** providers to attribute mass modification to a PID and suspend it.
 - [ ] Signed allow-list packs (retract false positives centrally).

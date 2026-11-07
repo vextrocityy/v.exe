@@ -7,8 +7,8 @@ named pipe. Close the dashboard and protection keeps running.
 | Budget | Target | Measured (Phase 1 engine, idle, release build) |
 |---|---|---|
 | CPU at idle | < 1 % | ~0.2 % on Linux with the 1-second *polling* fallback; the Windows CI smoke test enforces < 1 % with ETW |
-| RAM | < 150 MB | ~7 MB resident engine on Linux; the Windows CI smoke test enforces the 150 MB budget. The WebView2 dashboard is extra |
-| Engine binary | – | about 4 MB (LTO, stripped) |
+| RAM | < 150 MB | ~12 MB without YARA, ~61 MB with all ~5,100 YARA Forge rules loaded (Linux); the Windows CI smoke test enforces 150 MB with the full rule set. The WebView2 dashboard is extra |
+| Engine binary | – | about 25 MB (YARA-X embeds a WebAssembly code generator) |
 
 ## Layout
 
@@ -89,22 +89,35 @@ Data lives in `%ProgramData%\SentinelLite\` (`sentinel.db`, `quarantine\`, `sign
    Settings → Updates & schedule. Until then the dashboard shows that the feed needs a key. The key is
    masked in the UI and redacted from logs. Check abuse.ch's terms: commercial use may need an agreement with them.
    A `(path, size, mtime) → hash` cache makes re-scans of unchanged files nearly free.
-2. **Process Guard.** ETW `Microsoft-Windows-Kernel-Process` ProcessStart → hash the image →
+2. **YARA rules** (YARA-X engine). Executables, scripts, shortcuts and documents that no hash
+   matches are scanned with the curated **YARA Forge "core"** package (~5,000 rules, refreshed with
+   signature updates) plus any `.yar` files an administrator drops into `%ProgramData%\SentinelLite\rules\`.
+   Rules recognise malware *families and their new variants*, not just exact files. Matches with a rule
+   score ≥ 75 are quarantined (subject to the same safety gate as community hashes); lower scores are
+   reported for review. Verdicts are cached per file hash and rule-set version. Rules compile in a
+   short-lived child process, and the service loads the precompiled set (about 40 MB) at startup.
+3. **Process Guard.** ETW `Microsoft-Windows-Kernel-Process` ProcessStart → hash the image →
    on a match, `TerminateProcess` + quarantine. Falls back to 1 s Toolhelp polling if ETW
    cannot start, and the dashboard says so.
-3. **File Shield.** `ReadDirectoryChangesW` on Downloads / Desktop / Documents / Temp / Startup
+4. **File Shield.** `ReadDirectoryChangesW` on Downloads / Desktop / Documents / Temp / Startup
    for every profile. Files are scanned once they have been quiet for 1.5 s.
-4. **Persistence Watch.** Run/RunOnce (HKLM, WOW64, every user hive), Winlogon, service
+5. **Persistence Watch.** Run/RunOnce (HKLM, WOW64, every user hive), Winlogon, service
    ImagePaths and Startup folders are diffed against a baseline stored in SQLite.
-5. **Behaviour Engine** (alerts only, never auto-kills): process lineage / command-line shape,
+6. **Behaviour Engine** (alerts only, never auto-kills): process lineage / command-line shape,
    and ransomware-style mass modification across folders.
-6. **Scheduled quick scan** every 24 h at background CPU/IO priority.
+7. **Scheduled quick scan** every 24 h at background CPU/IO priority.
 
 ### False-positive safety
 
-Only exact hash matches ever kill or quarantine. Hashes from the **unsigned community feed**
-additionally never remediate a file under `%SystemRoot%` or one with a valid Authenticode
-signature: those are reported for review instead. A restored file's hash is allow-listed.
+Only signature matches kill or quarantine; behaviour heuristics only alert. Bundled and officially
+signed hashes always remediate. Hashes from the **unsigned community feed** and **YARA matches**
+never remediate a file under `%SystemRoot%` or one with a valid Authenticode signature, and YARA
+matches also need a rule score ≥ 75 (configurable). Those cases are reported for review instead.
+A restored file's hash is allow-listed.
+
+**What YARA does and doesn't catch.** It catches files that resemble known malware families
+(shared code, strings, packers, structure), including new builds no hash list has seen. It does not
+catch genuinely novel malware that no rule describes, or malware that only exists in memory.
 
 ## Security model
 

@@ -11,6 +11,7 @@
 //!   sentinel-service settings     print the active settings (JSON)
 //!   sentinel-service keygen       create an Ed25519 update-signing keypair
 //!   sentinel-service sign-pack <pack.json> <secret-key-file>   writes <pack.json>.sig
+//!   sentinel-service yara-check <rules-dir> [path]   compile rules, optionally scan (support/QA)
 //!   sentinel-service elevated-request <hex>   (internal) run one privileged request
 //!                                 for the dashboard after a UAC prompt
 
@@ -60,8 +61,19 @@ fn main() -> Result<()> {
         Some("update") => {
             app::init_logging(&paths, true);
             let engine = app::build_engine(paths)?;
-            let n = engine.update_signatures().map_err(anyhow::Error::msg)?;
-            println!("{n} new signatures; {} total", engine.db.signature_count());
+            if engine.settings().yara_enabled {
+                let _ = engine.reload_yara();
+            }
+            let result = engine.update_signatures();
+            if let Some(ev) = engine.db.recent_events(1, None)?.into_iter().next() {
+                println!("{}: {}", ev.title, ev.detail.unwrap_or_default());
+            }
+            let n = result.map_err(anyhow::Error::msg)?;
+            println!(
+                "{n} new signatures; {} total; {} YARA rules",
+                engine.db.signature_count(),
+                engine.yara.rules().map(|r| r.rule_count).unwrap_or(0)
+            );
             Ok(())
         }
         Some("events") => {
@@ -97,6 +109,86 @@ fn main() -> Result<()> {
             println!("wrote {pack}.sig");
             Ok(())
         }
+        Some("yara-check") => {
+            // Support tool: compile a rules directory and optionally scan a file/folder with it.
+            let Some(dir) = args.get(1) else {
+                bail!("usage: sentinel-service yara-check <rules-dir> [path]")
+            };
+            if dir == "--load" {
+                let set = engine::yara::RuleSet::load(std::path::Path::new(&args[2]))?;
+                println!(
+                    "loaded {} precompiled rules; resident memory {} MB",
+                    set.rule_count,
+                    platform::working_set_bytes().unwrap_or(0) / (1024 * 1024)
+                );
+                return Ok(());
+            }
+            let t = std::time::Instant::now();
+            let (set, report) = engine::yara::compile(&[std::path::PathBuf::from(dir)]);
+            for e in &report.errors {
+                eprintln!("skipped: {e}");
+            }
+            let set = set.ok_or_else(|| anyhow::anyhow!("no rules compiled"))?;
+            if let Ok(out) = std::env::var("SENTINEL_YARA_SAVE") {
+                set.save(std::path::Path::new(&out))?;
+            }
+            println!(
+                "{} rules compiled in {:.2} s; resident memory {} MB",
+                set.rule_count,
+                t.elapsed().as_secs_f32(),
+                platform::working_set_bytes().unwrap_or(0) / (1024 * 1024)
+            );
+            if let Some(target) = args.get(2) {
+                let mut stack = vec![std::path::PathBuf::from(target)];
+                let (mut files, mut bytes, mut hits) = (0u64, 0u64, 0u64);
+                let t = std::time::Instant::now();
+                while let Some(p) = stack.pop() {
+                    if p.is_dir() {
+                        if let Ok(rd) = std::fs::read_dir(&p) {
+                            stack.extend(rd.flatten().map(|e| e.path()));
+                        }
+                    } else if p.is_file() && engine::yara::is_candidate(&p) {
+                        files += 1;
+                        bytes += p.metadata().map(|m| m.len()).unwrap_or(0);
+                        if let Ok(m) = engine::yara::scan_file(&set, &p) {
+                            if let Some(top) = engine::yara::strongest(&m) {
+                                hits += 1;
+                                println!(
+                                    "MATCH {} -> {}:{} (score {})",
+                                    p.display(),
+                                    top.namespace,
+                                    top.rule,
+                                    top.score
+                                );
+                            }
+                        }
+                    }
+                }
+                let secs = t.elapsed().as_secs_f32().max(0.001);
+                println!(
+                    "scanned {files} candidate files ({:.1} MB) in {secs:.2} s = {:.1} MB/s, {hits} match(es); resident memory {} MB",
+                    bytes as f32 / 1e6,
+                    bytes as f32 / 1e6 / secs,
+                    platform::working_set_bytes().unwrap_or(0) / (1024 * 1024)
+                );
+            }
+            Ok(())
+        }
+        // Internal: run by the service to keep the compiler out of its own process.
+        Some("yara-compile") => {
+            println!("{}", engine::compile_rules_in_process(&paths, None)?);
+            Ok(())
+        }
+        Some("yara-validate") => {
+            let file = args
+                .get(1)
+                .ok_or_else(|| anyhow::anyhow!("usage: yara-validate <file>"))?;
+            println!(
+                "{}",
+                engine::compile_rules_in_process(&paths, Some(std::path::Path::new(file)))?
+            );
+            Ok(())
+        }
         Some("elevated-request") => elevated_request(args.get(1).map(String::as_str).unwrap_or("")),
         #[cfg(windows)]
         Some("install") => service::install(),
@@ -130,6 +222,11 @@ fn elevated_request(hex: &str) -> Result<()> {
 
 fn one_shot_scan(paths: AppPaths, targets: Vec<String>) -> Result<()> {
     let engine = app::build_engine(paths)?;
+    if engine.settings().yara_enabled {
+        if let Err(e) = engine.reload_yara() {
+            eprintln!("YARA unavailable: {e}");
+        }
+    }
     let mut events = engine.subscribe();
     let id = engine
         .start_scan(ScanKind::Custom, targets)
