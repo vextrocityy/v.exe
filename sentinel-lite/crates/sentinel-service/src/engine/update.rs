@@ -213,6 +213,15 @@ fn get_with_retry(url: &str, accept: Option<&str>) -> Result<ureq::Response> {
     }
 }
 
+/// Where `url` ends up after redirects (the body is not read).
+pub fn final_url(url: &str) -> Result<String> {
+    anyhow::ensure!(
+        crate::settings::is_allowed_update_url(url),
+        "refusing non-HTTPS update URL"
+    );
+    Ok(get_with_retry(url, None)?.get_url().to_string())
+}
+
 pub fn fetch(url: &str) -> Result<Vec<u8>> {
     match fetch_with(url, None) {
         Ok(b) => Ok(b),

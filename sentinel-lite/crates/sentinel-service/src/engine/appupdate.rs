@@ -113,7 +113,53 @@ pub fn parse_release(json: &[u8], api: &str) -> Result<Release> {
 
 pub fn fetch_latest(api: &str) -> Result<Release> {
     anyhow::ensure!(is_allowed_api_url(api), "refusing release lookup at {api}");
-    parse_release(&super::update::fetch(api)?, api)
+    match super::update::fetch(api).and_then(|json| parse_release(&json, api)) {
+        Ok(r) => Ok(r),
+        // GitHub's API allows 60 anonymous requests per hour per IP address (403/429
+        // when used up, common behind shared connections). The website needs no quota.
+        Err(api_err) if api == default_api() => fetch_latest_web().map_err(|web_err| {
+            anyhow::anyhow!("GitHub API: {api_err:#}; GitHub website: {web_err:#}")
+        }),
+        Err(e) => Err(e),
+    }
+}
+
+/// Find the latest release without the API: `/releases/latest` redirects to
+/// `/releases/tag/<tag>`, and the release's SHA256SUMS.txt names the installer.
+fn fetch_latest_web() -> Result<Release> {
+    let landed = super::update::final_url(&format!("https://github.com/{REPO}/releases/latest"))?;
+    let tag = tag_from_release_url(&landed).with_context(|| format!("unexpected release page {landed}"))?;
+    let base = format!("https://github.com/{REPO}/releases/download/{tag}");
+    let sums_url = format!("{base}/SHA256SUMS.txt");
+    let sums = String::from_utf8_lossy(&super::update::fetch(&sums_url)?).into_owned();
+    let installer_name = installer_in_sums(&sums).context("SHA256SUMS.txt lists no installer")?;
+    let build: u64 = tag
+        .strip_prefix(TAG_PREFIX)
+        .and_then(|n| n.parse().ok())
+        .with_context(|| format!("release tag {tag} is not a Vigil build"))?;
+    Ok(Release {
+        build,
+        installer_url: format!("{base}/{installer_name}"),
+        installer_name,
+        sums_url,
+        tag,
+    })
+}
+
+/// `https://github.com/o/r/releases/tag/<tag>` → `<tag>` (letters, digits, `-_.` only).
+fn tag_from_release_url(url: &str) -> Option<String> {
+    let tag = url.split_once("/releases/tag/")?.1.trim_end_matches('/');
+    let ok = !tag.is_empty() && tag.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b));
+    ok.then(|| tag.to_string())
+}
+
+/// The `*-setup.exe` file named in a sha256sum-format list.
+fn installer_in_sums(sums: &str) -> Option<String> {
+    sums.lines().find_map(|l| {
+        let name = l.split_whitespace().nth(1)?.trim_start_matches('*');
+        let safe = name.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b));
+        (safe && name.to_ascii_lowercase().ends_with("-setup.exe")).then(|| name.to_string())
+    })
 }
 
 /// `sha256  filename` lines (sha256sum format).
@@ -245,6 +291,19 @@ pub fn finish_pending(engine: &Engine) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_the_latest_release_from_the_website() {
+        assert_eq!(
+            tag_from_release_url("https://github.com/vextrocityy/v.exe/releases/tag/sentinel-lite-build-23").as_deref(),
+            Some("sentinel-lite-build-23")
+        );
+        assert_eq!(tag_from_release_url("https://github.com/vextrocityy/v.exe/releases"), None);
+        assert_eq!(tag_from_release_url("https://github.com/o/r/releases/tag/../../x"), None);
+        let sums = "0f00  SHA256SUMS.txt\nab12cd  Vigil_0.1.0_x64-setup.exe\n";
+        assert_eq!(installer_in_sums(sums).as_deref(), Some("Vigil_0.1.0_x64-setup.exe"));
+        assert_eq!(installer_in_sums("ab  ../../evil-setup.exe\n"), None);
+    }
 
     fn release_json(tag: &str, base: &str) -> String {
         format!(
