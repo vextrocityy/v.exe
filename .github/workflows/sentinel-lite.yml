@@ -96,6 +96,13 @@ jobs:
           if ($run."Sentinel-Lite") { throw "old autostart entry left behind" }
           if (-not $run."Vigil") { throw "Vigil autostart entry missing" }
           if (Test-Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Sentinel-Lite") { throw "old uninstall entry left behind" }
+          # YARA must be protecting again shortly after the upgrade (the rules moved folders).
+          $vsvc = "C:\Program Files\Vigil\sentinel-service.exe"
+          $deadline = (Get-Date).AddSeconds(120)
+          while ((Get-Date) -lt $deadline -and ((& $vsvc status | Out-String | ConvertFrom-Json).data.yara_rule_count -lt 1)) { Start-Sleep 2 }
+          $st = (& $vsvc status | Out-String | ConvertFrom-Json).data
+          if ($st.yara_rule_count -lt 1) { $st.shields | Format-Table name, running, detail -AutoSize | Out-Host; throw "YARA rules not active after upgrade" }
+          "State after upgrade: $($st.state | ConvertTo-Json -Compress)  YARA rules: $($st.yara_rule_count)"
           "Upgrade from Sentinel-Lite build 18 OK"
       - name: Silent install, verify, uninstall
         shell: pwsh

@@ -60,15 +60,25 @@ fn rule_files(dirs: &[PathBuf]) -> Vec<PathBuf> {
     files
 }
 
-/// Fingerprint of every rule source (path + content); the compiled cache and
-/// verdict cache are only valid for the fingerprint they were built from.
+/// Fingerprint of every rule source (file name + content); the compiled cache
+/// and verdict cache are only valid for the fingerprint they were built from.
+/// Folder locations are deliberately left out, so moving the install folder
+/// (as the Sentinel-Lite → Vigil upgrade did) does not force a recompile.
 pub fn fingerprint(dirs: &[PathBuf]) -> String {
+    let mut parts: Vec<(String, Vec<u8>)> = rule_files(dirs)
+        .into_iter()
+        .map(|p| {
+            let name = p.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
+            let digest = std::fs::read(&p).map(|src| Sha256::digest(&src).to_vec()).unwrap_or_default();
+            (name, digest)
+        })
+        .collect();
+    parts.sort();
     let mut h = Sha256::new();
-    for path in rule_files(dirs) {
-        h.update(path.to_string_lossy().as_bytes());
-        if let Ok(src) = std::fs::read(&path) {
-            h.update(Sha256::digest(&src));
-        }
+    for (name, digest) in parts {
+        h.update(name.as_bytes());
+        h.update([0]);
+        h.update(digest);
     }
     super::hasher::to_hex(&h.finalize())[..16].to_string()
 }
@@ -296,13 +306,24 @@ impl YaraEngine {
         compile_fn: impl FnOnce() -> Result<String>,
     ) -> Result<String> {
         let want = fingerprint(dirs);
-        let cached = RuleSet::load(compiled).ok().filter(|s| s.version == want);
+        let (cached, stale): (Option<RuleSet>, Option<RuleSet>) = match RuleSet::load(compiled).ok() {
+            Some(s) if s.version == want => (Some(s), None),
+            other => (None, other),
+        };
         let (set, line) = match cached {
             Some(set) => {
                 let line = format!("{} rules (precompiled)", set.rule_count);
                 (set, line)
             }
             None => {
+                // Rules changed (or moved): protect with the previous compiled set
+                // while the new one compiles, instead of running without YARA.
+                if let Some(old) = stale.filter(|_| self.rules().is_none()) {
+                    let note = format!("{} rules (updating…)", old.rule_count);
+                    tracing::info!("YARA: using the previous compiled rules while recompiling");
+                    *self.current.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(old));
+                    *self.last_report.write().unwrap_or_else(|e| e.into_inner()) = Some(note);
+                }
                 let line = compile_fn()?;
                 let set = RuleSet::load(compiled)?;
                 (set, line)
@@ -376,6 +397,39 @@ rule Unscored_Rule {
         std::fs::write(dir.path().join("a.yar"), TEST_RULE.replace("90", "95")).unwrap();
         let v2 = compile(&[dir.path().to_path_buf()]).0.unwrap().version;
         assert_ne!(v1, v2);
+    }
+
+    #[test]
+    fn moving_the_rules_folder_keeps_the_fingerprint() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        std::fs::write(a.path().join("t.yar"), TEST_RULE).unwrap();
+        std::fs::write(b.path().join("t.yar"), TEST_RULE).unwrap();
+        assert_eq!(fingerprint(&[a.path().to_path_buf()]), fingerprint(&[b.path().to_path_buf()]));
+        std::fs::write(b.path().join("t.yar"), format!("{TEST_RULE}\n// edited")).unwrap();
+        assert_ne!(fingerprint(&[a.path().to_path_buf()]), fingerprint(&[b.path().to_path_buf()]));
+    }
+
+    #[test]
+    fn previous_rules_protect_while_recompiling() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("t.yar"), TEST_RULE).unwrap();
+        let compiled = dir.path().join("compiled.bin");
+        compile(std::slice::from_ref(&src)).0.unwrap().save(&compiled).unwrap();
+        // The sources change, so the saved set is stale.
+        std::fs::write(src.join("t.yar"), format!("{TEST_RULE}\n// new version")).unwrap();
+
+        let engine = YaraEngine::default();
+        let seen_during_compile = std::cell::Cell::new(None);
+        let result = engine.load_or_compile(std::slice::from_ref(&src), &compiled, || {
+            seen_during_compile.set(engine.rules().map(|r| r.rule_count));
+            anyhow::bail!("compiler crashed")
+        });
+        assert!(result.is_err());
+        assert_eq!(seen_during_compile.get(), Some(2), "old rules were not active during the compile");
+        assert!(engine.rules().is_some(), "a failed recompile must not drop the working rules");
     }
 
     #[test]

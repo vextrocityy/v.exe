@@ -1413,7 +1413,7 @@ impl Engine {
             name: "YARA Rules".into(),
             enabled: settings.yara_enabled,
             running: settings.yara_enabled && yara_rules.is_some(),
-            detail: self.yara.status_line().or_else(|| Some("Loading rules…".into())),
+            detail: self.yara.status_line().or_else(|| Some(LOADING_RULES.into())),
         });
         let signature_count = self.db.signature_count();
 
@@ -1422,7 +1422,12 @@ impl Engine {
             reasons.push("Real-time protection is turned off".to_string());
         }
         for s in shields.iter().filter(|s| s.enabled && !s.running) {
-            reasons.push(format!("{} is not running", s.name));
+            match s.detail.as_deref() {
+                // First start: rules are being compiled (a minute or so); not a fault.
+                Some(LOADING_RULES) => {}
+                Some(d) if d.starts_with("YARA rules failed") => reasons.push(d.to_string()),
+                _ => reasons.push(format!("{} is not running", s.name)),
+            }
         }
         if signature_count == 0 {
             reasons.push("No threat signatures loaded".to_string());
@@ -1463,6 +1468,8 @@ impl Engine {
         }
     }
 }
+
+const LOADING_RULES: &str = "Loading rules…";
 
 /// Profiles that get decoys. Unit tests plant their own and never touch real profiles.
 fn decoy_profiles() -> Vec<PathBuf> {
