@@ -2,11 +2,12 @@
 //! scans the binary behind every new or changed entry.
 //!
 //! Watched: Run/RunOnce (HKLM, WOW6432Node, every loaded user hive),
-//! Winlogon Shell/Userinit, service ImagePaths, and Startup folders.
+//! Winlogon Shell/Userinit, service ImagePaths, Startup folders and Scheduled
+//! Tasks (see [`super::tasks`]).
 //! The baseline lives in SQLite, so changes made while the service was stopped
 //! are reported at the next start.
 
-use super::{sleep_or_stop, ShieldHandle, PERSISTENCE_WATCH};
+use super::{sleep_or_stop, tasks, ShieldHandle, PERSISTENCE_WATCH};
 use crate::engine::{targets, Engine};
 use sentinel_protocol::{EventKind, Severity};
 use std::collections::HashMap;
@@ -59,20 +60,29 @@ fn poll(engine: &Engine, baseline: &mut HashMap<String, String>, first_run: &mut
                 if is_own_entry(value) || is_own_entry(key) {
                     continue;
                 }
-                let change = match baseline.get(key) {
-                    None => "New autostart entry",
-                    Some(old) if old != value => "Autostart entry modified",
+                let is_new = match baseline.get(key) {
+                    None => true,
+                    Some(old) if old != value => false,
                     _ => continue,
                 };
-                engine.emit(
-                    EventKind::PersistenceChange,
-                    Severity::Medium,
-                    change,
-                    Some(format!("{key} = {value}")),
-                    None,
-                    None,
-                );
-                if let Some(target) = target_of(key, value) {
+                let targets = if let Some(task) = key.strip_prefix(tasks::KEY_PREFIX) {
+                    if tasks::is_routine(task, value) {
+                        continue;
+                    }
+                    report_task(engine, task, value, is_new);
+                    tasks::targets(value)
+                } else {
+                    engine.emit(
+                        EventKind::PersistenceChange,
+                        Severity::Medium,
+                        if is_new { "New autostart entry" } else { "Autostart entry modified" },
+                        Some(format!("{key} = {value}")),
+                        None,
+                        None,
+                    );
+                    target_of(key, value).into_iter().collect()
+                };
+                for target in targets {
                     if let Ok(v) = engine.check_file(&target, None) {
                         if v.hit.is_some() {
                             engine.handle_detection(&target, &v, None, "Persistence Watch");
@@ -89,6 +99,32 @@ fn poll(engine: &Engine, baseline: &mut HashMap<String, String>, first_run: &mut
         }
         *first_run = false;
     }
+}
+
+/// Alert for a new / changed scheduled task. The task name goes in `path`, so the
+/// dashboard can offer "Disable task".
+fn report_task(engine: &Engine, task: &str, value: &str, is_new: bool) {
+    let flags: Vec<&str> = value.split(" ; ").flat_map(tasks::red_flags).collect();
+    let severity = if flags.len() >= 2 {
+        Severity::High
+    } else {
+        Severity::Medium
+    };
+    let mut detail = format!("Runs: {}", if value.is_empty() { "(no program)" } else { value });
+    if !flags.is_empty() {
+        let mut flags = flags;
+        flags.dedup();
+        detail.push_str(&format!(". Red flags: {}", flags.join("; ")));
+    }
+    detail.push_str(". If you did not install something that needs this, disable it.");
+    engine.emit(
+        EventKind::PersistenceChange,
+        severity,
+        if is_new { "New scheduled task" } else { "Scheduled task changed" },
+        Some(detail),
+        Some(Path::new(task)),
+        None,
+    );
 }
 
 /// Which file does this entry launch?
@@ -164,6 +200,8 @@ pub enum Removed {
     ServiceDisabled { name: String, previous_start: u32 },
     /// A Startup-folder item (shortcut, .desktop file) moved to quarantine.
     StartupItem { quarantine_id: String },
+    /// A scheduled task that launched the file: disabled, not deleted.
+    TaskDisabled { name: String },
 }
 
 /// Does this command string launch `target`?
@@ -205,11 +243,18 @@ pub fn startup_items_referencing(target: &Path, folders: &[PathBuf]) -> Vec<Path
     out
 }
 
-/// Remove registry autostarts that launch `target`. Windows only.
+/// Remove registry autostarts and disable scheduled tasks that launch `target`. Windows only.
 pub fn remove_registry_references(target: &Path) -> Vec<(Removed, String)> {
     #[cfg(windows)]
     {
-        registry::remove_references(target)
+        let mut out = registry::remove_references(target);
+        for name in tasks::tasks_launching(&tasks::tasks_dir(), target) {
+            match tasks::set_enabled(&name, false) {
+                Ok(()) => out.push((Removed::TaskDisabled { name: name.clone() }, format!("scheduled task {name} (disabled)"))),
+                Err(e) => tracing::warn!(task = %name, error = %format!("{e:#}"), "could not disable scheduled task"),
+            }
+        }
+        out
     }
     #[cfg(not(windows))]
     {
@@ -218,8 +263,11 @@ pub fn remove_registry_references(target: &Path) -> Vec<(Removed, String)> {
     }
 }
 
-/// Put a removed registry entry back.
+/// Put a removed registry entry back (or re-enable a task).
 pub fn restore_registry(entry: &Removed) -> anyhow::Result<()> {
+    if let Removed::TaskDisabled { name } = entry {
+        return tasks::set_enabled(name, true);
+    }
     #[cfg(windows)]
     {
         registry::restore(entry)
@@ -270,7 +318,10 @@ fn collect() -> HashMap<String, String> {
         }
     }
     #[cfg(windows)]
-    registry::collect(&mut map);
+    {
+        registry::collect(&mut map);
+        tasks::collect(&tasks::tasks_dir(), &mut map);
+    }
     map
 }
 
@@ -389,7 +440,7 @@ mod registry {
                 svc.set_value("Start", previous_start)?;
                 Ok(())
             }
-            Removed::StartupItem { .. } => Ok(()),
+            Removed::StartupItem { .. } | Removed::TaskDisabled { .. } => Ok(()),
         }
     }
 

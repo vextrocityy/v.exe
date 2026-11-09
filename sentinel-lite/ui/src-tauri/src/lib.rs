@@ -153,6 +153,60 @@ fn open_virustotal(app: AppHandle, sha256: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn disable_task(name: String) -> Result<(), String> {
+    call_privileged(Request::DisableTask { name }).await.map(|_| ())
+}
+
+#[tauri::command]
+async fn get_device_usage() -> Result<Vec<DeviceUse>, String> {
+    match call(Request::GetDeviceUsage).await? {
+        Response::DeviceUsage(v) => Ok(v),
+        r => Err(unexpected(r)),
+    }
+}
+
+#[tauri::command]
+async fn list_snapshots() -> Result<Vec<Snapshot>, String> {
+    match call(Request::ListSnapshots).await? {
+        Response::Snapshots(v) => Ok(v),
+        r => Err(unexpected(r)),
+    }
+}
+
+#[tauri::command]
+async fn create_snapshot() -> Result<(), String> {
+    call(Request::CreateSnapshot).await.map(|_| ()).map_err(Into::into)
+}
+
+#[derive(serde::Serialize)]
+struct Preview {
+    changes: Vec<FileChange>,
+    truncated: bool,
+}
+
+#[tauri::command]
+async fn rollback_preview(snapshot_id: String, folders: Option<Vec<String>>) -> Result<Preview, String> {
+    match call(Request::RollbackPreview {
+        snapshot_id,
+        folders: folders.unwrap_or_default(),
+    })
+    .await?
+    {
+        Response::RollbackPreview { changes, truncated } => Ok(Preview { changes, truncated }),
+        r => Err(unexpected(r)),
+    }
+}
+
+/// Writes user files from a snapshot: always needs administrator approval.
+/// The result (files restored, backup folder) arrives as a Recovery event.
+#[tauri::command]
+async fn rollback_restore(snapshot_id: String, paths: Vec<String>) -> Result<(), String> {
+    call_privileged(Request::RollbackRestore { snapshot_id, paths })
+        .await
+        .map(|_| ())
+}
+
+#[tauri::command]
 async fn get_events(limit: Option<u32>, before_id: Option<i64>) -> Result<Vec<SecurityEvent>, String> {
     match call(Request::GetEvents {
         limit: limit.unwrap_or(100),
@@ -217,6 +271,9 @@ fn maybe_notify(app: &AppHandle, ev: &SecurityEvent) {
     let important = match ev.kind {
         EventKind::ThreatDetected | EventKind::ProcessBlocked | EventKind::ProcessSuspended => true,
         EventKind::BehaviorAlert => ev.severity >= Severity::High,
+        // Camera / microphone switched on (switching off is Info: no toast).
+        EventKind::DeviceAccess => ev.severity >= Severity::Low,
+        EventKind::PersistenceChange => ev.severity >= Severity::High,
         _ => false,
     };
     if !important {
@@ -231,7 +288,7 @@ fn maybe_notify(app: &AppHandle, ev: &SecurityEvent) {
     let _ = app
         .notification()
         .builder()
-        .title(format!("Sentinel-Lite: {}", ev.title))
+        .title(format!("Vigil: {}", ev.title))
         .body(body.trim())
         .show();
 }
@@ -270,12 +327,12 @@ fn spawn_event_bridge(app: AppHandle) {
 }
 
 fn build_tray(app: &tauri::App) -> tauri::Result<()> {
-    let open = MenuItem::with_id(app, "open", "Open Sentinel-Lite", true, None::<&str>)?;
+    let open = MenuItem::with_id(app, "open", "Open Vigil", true, None::<&str>)?;
     let scan = MenuItem::with_id(app, "scan", "Run quick scan", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Close dashboard (protection stays on)", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&open, &scan, &quit])?;
     let mut tray = TrayIconBuilder::with_id("main")
-        .tooltip("Sentinel-Lite: protection is handled by the background service")
+        .tooltip("Vigil: protection is handled by the background service")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
@@ -347,6 +404,12 @@ pub fn run() {
             pick_files,
             open_virustotal,
             enable_hardening,
+            disable_task,
+            get_device_usage,
+            list_snapshots,
+            create_snapshot,
+            rollback_preview,
+            rollback_restore,
             get_events,
             list_quarantine,
             restore_quarantine,
@@ -355,5 +418,5 @@ pub fn run() {
             update_settings,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running Sentinel-Lite dashboard");
+        .expect("error while running Vigil dashboard");
 }

@@ -1,8 +1,14 @@
-# Sentinel-Lite
+# Vigil
 
 A lightweight Windows endpoint-protection agent: a native Rust **service** that does
 all detection, and a **Tauri + React** dashboard that only talks to it over a secured
 named pipe. Close the dashboard and protection keeps running.
+
+*Formerly Sentinel-Lite.* Internal names that installed copies and the self-updater
+rely on are unchanged: the Windows service `SentinelLite`, the pipe
+`\\.\pipe\sentinel_lite_ipc`, the data folder `%ProgramData%\SentinelLite`, the engine
+`sentinel-service.exe` and release tags `sentinel-lite-build-N`. Installing Vigil over
+a Sentinel-Lite install moves the service to `C:\Program Files\Vigil` and removes the old folder.
 
 | Budget | Target | Measured (Phase 1 engine, idle, release build) |
 |---|---|---|
@@ -102,7 +108,12 @@ Data lives in `%ProgramData%\SentinelLite\` (`sentinel.db`, `quarantine\`, `sign
 4. **File Shield.** `ReadDirectoryChangesW` on Downloads / Desktop / Documents / Temp / Startup
    for every profile. Files are scanned once they have been quiet for 1.5 s.
 5. **Persistence Watch.** Run/RunOnce (HKLM, WOW64, every user hive), Winlogon, service
-   ImagePaths and Startup folders are diffed against a baseline stored in SQLite.
+   ImagePaths, Startup folders and **Scheduled Tasks** are diffed against a baseline stored in
+   SQLite. Tasks are read from their XML definitions in `System32\Tasks`; a new or changed task is
+   reported with its command line and red flags (script hosts, user-writable folders, hidden or
+   encoded PowerShell, downloads), and the program or script it launches is scanned. Built-in
+   `\Microsoft\` tasks that run system binaries with nothing suspicious stay quiet. Activity offers
+   **Disable this task** (administrator approval).
 6. **Behaviour Engine** (alerts only, never auto-kills): process lineage / command-line shape,
    and ransomware-style mass modification across folders.
 7. **Scheduled quick scan** every 24 h at background CPU/IO priority.
@@ -119,8 +130,8 @@ Data lives in `%ProgramData%\SentinelLite\` (`sentinel.db`, `quarantine\`, `sign
    never suspended. Damaged decoys are re-planted, and decoys changed while protection was off are
    reported at the next start.
 10. **Startup clean-up.** When a file is quarantined, the Run/RunOnce values (machine and every
-    user), Startup-folder shortcuts and services that launch it are removed. Services are disabled
-    rather than deleted. Every removal is recorded, and restoring the file from quarantine puts its
+    user), Startup-folder shortcuts, scheduled tasks and services that launch it are removed.
+    Services and tasks are disabled rather than deleted. Every removal is recorded, and restoring the file from quarantine puts its
     startup entries back.
 11. **Execution Guard.** A program without a valid Authenticode signature that starts from
     Downloads, Temp, Windows\Temp or AppData\Roaming is terminated the moment ETW reports it
@@ -138,6 +149,23 @@ Data lives in `%ProgramData%\SentinelLite\` (`sentinel.db`, `quarantine\`, `sign
     never blocked.
 15. **Windows hardening panel.** The dashboard checks LSA protection (blocks LSASS credential
     dumping), the firewall profiles and UAC, and can switch LSA protection on.
+16. **Ransomware rollback.** Every 4 hours (configurable) the service takes a Volume Shadow Copy of
+    the system drive through WMI (`Win32_ShadowCopy`) and keeps its 3 newest; ransomware alerts say
+    which snapshot to roll back to. **Recovery** compares each user's Desktop, Documents, Pictures,
+    Music, Videos and Downloads with a snapshot (read via its `\\?\GLOBALROOT\Device\…` path),
+    lists files that were modified or deleted since, flags the ones that now look encrypted (near-
+    random content where the snapshot copy was not, or a lost file header), and restores the ones
+    you tick. Current copies are first moved to `<profile>\Vigil Restore Backup\<time>`, so a
+    restore never destroys anything. Restoring needs administrator approval. Process Guard
+    terminates the commands ransomware uses to destroy recovery first (`vssadmin delete shadows`,
+    `wmic shadowcopy delete`, PowerShell removing `Win32_ShadowCopy`, `wbadmin delete`, `bcdedit
+    … recoveryenabled no`). Like Execution Guard this is user-mode, so a command that finishes in
+    the milliseconds before ETW reports it can still succeed.
+17. **Camera & microphone alerts.** Windows records each app's capture sessions under
+    `CapabilityAccessManager\ConsentStore`; the service reads it for every signed-in user every
+    2 s and notifies the moment an app turns the camera or microphone on (louder for unsigned apps
+    or apps running from Downloads / Temp / AppData). **Privacy** shows what is in use now and the
+    full history.
 
 ### File Check
 
@@ -207,7 +235,7 @@ sentinel-service start | stop      # service control (admin)
 ```
 
 The NSIS installer (`scripts/build-release.ps1`) installs the dashboard and service into
-`C:\Program Files\Sentinel-Lite`, registers and starts the service, and starts the dashboard
+`C:\Program Files\Vigil`, registers and starts the service, and starts the dashboard
 in the tray at login. Uninstall removes both and keeps `%ProgramData%\SentinelLite`
 (quarantine vault, logs). See [`docs/RELEASING.md`](docs/RELEASING.md) for signing keys,
 publishing signature packs and code signing.

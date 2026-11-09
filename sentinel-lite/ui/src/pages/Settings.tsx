@@ -10,7 +10,8 @@ type BoolKey = { [K in keyof Settings]: Settings[K] extends boolean ? K : never 
 const SHIELDS: { key: BoolKey; label: string; hint: string }[] = [
   { key: "process_monitor", label: "Process Guard", hint: "Check every new process against signatures as it starts." },
   { key: "file_monitor", label: "File Shield", hint: "Scan files as they land in Downloads, Desktop, Temp and Startup." },
-  { key: "persistence_monitor", label: "Persistence Watch", hint: "Alert on new Run keys, services and Startup items." },
+  { key: "persistence_monitor", label: "Persistence Watch", hint: "Alert on new Run keys, services, Startup items and scheduled tasks." },
+  { key: "privacy_monitor", label: "Camera & microphone alerts", hint: "Notify the moment any app turns on your camera or microphone." },
   { key: "behavior_monitor", label: "Behavior Engine", hint: "Detect ransomware-like mass modification and suspicious process chains." },
 ];
 
@@ -50,7 +51,7 @@ function AppUpdateRow({ s, set }: { s: Settings; set: <K extends keyof Settings>
   };
   return (
     <>
-      <Row label="Install app updates automatically" hint="New Sentinel-Lite releases are downloaded from this project's GitHub Releases, checked against their SHA-256 checksums and installed silently. The dashboard reopens in the tray afterwards.">
+      <Row label="Install app updates automatically" hint="New Vigil releases are downloaded from this project's GitHub Releases, checked against their SHA-256 checksums and installed silently. The dashboard reopens in the tray afterwards.">
         <Toggle label="Install app updates automatically" checked={s.auto_update_app} onChange={(v) => set("auto_update_app", v)} />
       </Row>
       <div className="flex items-center justify-between gap-6 border-b border-slate-800/70 px-5 py-4">
@@ -214,8 +215,14 @@ export function SettingsPage() {
         <Row label="Suspend the culprit" hint="When a decoy changes, freeze the program writing the most (never Windows or signed programs). You choose Terminate or Resume.">
           <Toggle label="Suspend the culprit" checked={s.ransomware_suspend} disabled={!s.ransomware_decoys} onChange={(v) => set("ransomware_suspend", v)} />
         </Row>
-        <Row label="Startup clean-up" hint="When a file is quarantined, also remove the Run keys, Startup shortcuts and services that launch it. Restoring the file puts them back.">
+        <Row label="Startup clean-up" hint="When a file is quarantined, also remove the Run keys, Startup shortcuts, scheduled tasks and services that launch it. Restoring the file puts them back.">
           <Toggle label="Startup clean-up" checked={s.startup_cleanup} onChange={(v) => set("startup_cleanup", v)} />
+        </Row>
+        <Row label="Rollback snapshots" hint="Keep the 3 newest snapshots (Volume Shadow Copies) of your system drive, so files hit by ransomware can be restored from Recovery. Attempts to delete them are blocked.">
+          <Toggle label="Rollback snapshots" checked={s.rollback_snapshots} onChange={(v) => set("rollback_snapshots", v)} />
+        </Row>
+        <Row label="Snapshot every (hours)" hint="More often = less lost work after an attack; each snapshot only stores what changed.">
+          <NumberInput value={s.rollback_interval_hours} min={1} max={168} onChange={(v) => set("rollback_interval_hours", v)} />
         </Row>
       </Panel>
 

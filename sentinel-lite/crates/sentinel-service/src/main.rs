@@ -18,6 +18,7 @@
 //!   sentinel-service yara-check <rules-dir> [path]   compile rules, optionally scan (support/QA)
 //!   sentinel-service elevated-request <hex>   (internal) run one privileged request
 //!                                 for the dashboard after a UAC prompt
+//!   sentinel-service request <json|hex>       send one IPC request, print the JSON response
 
 mod app;
 mod database;
@@ -117,6 +118,21 @@ fn main() -> Result<()> {
         }
         Some("settings") => {
             let resp = ipc::client::request(&sentinel_protocol::Request::GetSettings)?;
+            println!("{}", serde_json::to_string_pretty(&resp)?);
+            Ok(())
+        }
+        // Send one request (JSON) and print the response; the service applies its usual
+        // checks (an elevated caller is still required for privileged requests).
+        Some("request") => {
+            let arg = args.get(1).ok_or_else(|| anyhow::anyhow!("usage: request <json | hex-encoded json>"))?;
+            // Hex avoids shell quoting trouble (the smoke test sends it that way).
+            let raw = if arg.trim_start().starts_with('{') {
+                arg.as_bytes().to_vec()
+            } else {
+                util::from_hex(arg).ok_or_else(|| anyhow::anyhow!("bad request encoding"))?
+            };
+            let req: sentinel_protocol::Request = serde_json::from_slice(&raw)?;
+            let resp = ipc::client::request(&req)?;
             println!("{}", serde_json::to_string_pretty(&resp)?);
             Ok(())
         }
@@ -252,6 +268,8 @@ fn elevated_request(hex: &str) -> Result<()> {
             | Request::QuarantinePath { .. }
             | Request::TrustApp { .. }
             | Request::EnableHardening { .. }
+            | Request::DisableTask { .. }
+            | Request::RollbackRestore { .. }
     ) {
         bail!("request type not allowed");
     }

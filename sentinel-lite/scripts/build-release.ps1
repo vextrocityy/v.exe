@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Builds the Sentinel-Lite installer (NSIS) with the engine bundled.
+  Builds the Vigil installer (NSIS) with the engine bundled.
 
 .PARAMETER UpdatePubKeys
   Comma-separated Ed25519 public keys (hex) trusted for official signature packs.

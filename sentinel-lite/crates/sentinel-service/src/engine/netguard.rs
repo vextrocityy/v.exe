@@ -169,7 +169,7 @@ mod imp {
 
     impl Firewall {
         pub fn install(ranges: &[Range]) -> Result<Self> {
-            let name = wide("Sentinel-Lite Network Guard");
+            let name = wide("Vigil Network Guard");
             let desc = wide("Blocks connections to known-malicious networks");
             unsafe {
                 let mut session: FWPM_SESSION0 = std::mem::zeroed();

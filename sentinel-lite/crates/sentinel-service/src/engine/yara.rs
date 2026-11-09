@@ -326,7 +326,7 @@ mod tests {
     const TEST_RULE: &str = r#"
 rule Sentinel_Test_Marker {
   meta:
-    description = "Harmless marker used by Sentinel-Lite tests"
+    description = "Harmless marker used by Vigil tests"
     score = 90
   strings:
     $m = "SENTINEL-LITE-YARA-TEST-MARKER"

@@ -5,6 +5,8 @@ import { isTauri } from "./lib/api";
 import { ActivityPage } from "./pages/Activity";
 import { Dashboard } from "./pages/Dashboard";
 import { FileCheckPage } from "./pages/FileCheck";
+import { PrivacyPage } from "./pages/Privacy";
+import { RecoveryPage } from "./pages/Recovery";
 import { QuarantinePage } from "./pages/Quarantine";
 import { SettingsPage } from "./pages/Settings";
 
@@ -12,6 +14,8 @@ const TITLES: Record<Page, string> = {
   dashboard: "Overview",
   filecheck: "File Check",
   activity: "Activity",
+  privacy: "Privacy",
+  recovery: "Recovery",
   quarantine: "Quarantine",
   settings: "Settings",
 };
@@ -38,6 +42,8 @@ export default function App() {
           {page === "dashboard" && <Dashboard status={status} events={events} refresh={refresh} onSeeAll={() => setPage("activity")} />}
           {page === "filecheck" && <FileCheckPage />}
           {page === "activity" && <ActivityPage events={events} />}
+          {page === "privacy" && <PrivacyPage status={status} />}
+          {page === "recovery" && <RecoveryPage status={status} events={events} refresh={refresh} />}
           {page === "quarantine" && <QuarantinePage onChanged={refresh} />}
           {page === "settings" && <SettingsPage />}
         </div>

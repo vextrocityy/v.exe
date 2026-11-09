@@ -1,4 +1,4 @@
-//! Sentinel-Lite IPC protocol.
+//! Vigil IPC protocol.
 //!
 //! Transport: `\\.\pipe\sentinel_lite_ipc` (Windows) or a Unix socket in dev builds.
 //! Framing:   4-byte little-endian length prefix followed by a UTF-8 JSON body.
@@ -12,7 +12,7 @@ pub const PIPE_NAME: &str = r"\\.\pipe\sentinel_lite_ipc";
 /// Hard upper bound on one frame; protects the service from memory exhaustion.
 pub const MAX_FRAME_BYTES: u32 = 4 * 1024 * 1024;
 /// Bumped on any incompatible change; the UI refuses to talk to a different version.
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 /// Placeholder sent instead of stored secrets; sending it back means "unchanged".
 pub const SECRET_MASK: &str = "********";
 
@@ -104,7 +104,7 @@ pub struct EngineStatus {
     /// IPv4 ranges currently blocked by Network Guard.
     #[serde(default)]
     pub network_blocked_ranges: u64,
-    /// Windows security features Sentinel-Lite relies on (LSA protection, firewall, UAC).
+    /// Windows security features Vigil relies on (LSA protection, firewall, UAC).
     #[serde(default)]
     pub hardening: Vec<HardeningCheck>,
     /// CI build number of this installation (0 = local dev build).
@@ -113,6 +113,68 @@ pub struct EngineStatus {
     /// Human-readable state of app self-updates.
     #[serde(default)]
     pub app_update_status: Option<String>,
+    /// Camera / microphone sessions open right now.
+    #[serde(default)]
+    pub devices_in_use: Vec<DeviceUse>,
+    /// Unix time of the newest rollback snapshot, if any.
+    #[serde(default)]
+    pub last_snapshot: Option<i64>,
+    #[serde(default)]
+    pub snapshot_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Device {
+    Camera,
+    Microphone,
+}
+
+/// One app's use of the camera or microphone, as recorded by Windows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceUse {
+    pub device: Device,
+    /// Friendly name (file name, or the Store app's package name).
+    pub app: String,
+    /// Full path for desktop apps; `None` for Store apps.
+    pub path: Option<String>,
+    /// Windows account (SID) whose settings recorded it.
+    pub user: Option<String>,
+    pub in_use: bool,
+    pub last_started: Option<i64>,
+    pub last_stopped: Option<i64>,
+}
+
+/// A Volume Shadow Copy that files can be rolled back from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Snapshot {
+    pub id: String,
+    pub created_at: i64,
+    /// Volume it covers, e.g. `C:\`.
+    pub volume: String,
+    /// Created by this app (kept up to date and pruned automatically).
+    pub ours: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangeKind {
+    /// Exists in both; the current copy is different.
+    Modified,
+    /// In the snapshot, gone now (ransomware usually deletes the original).
+    Deleted,
+}
+
+/// A file that differs from its version in a snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileChange {
+    pub path: String,
+    pub change: ChangeKind,
+    pub size_then: u64,
+    pub size_now: Option<u64>,
+    pub modified_at: Option<i64>,
+    /// The current copy looks encrypted while the snapshot copy does not.
+    pub looks_encrypted: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -145,7 +207,7 @@ pub struct Detection {
     pub description: Option<String>,
 }
 
-/// Everything Sentinel-Lite knows about one file. Produced without changing the file.
+/// Everything Vigil knows about one file. Produced without changing the file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileReport {
     pub path: String,
@@ -180,6 +242,10 @@ pub enum EventKind {
     /// A process was suspended (reversible); the user decides to resume or terminate it.
     ProcessSuspended,
     PersistenceChange,
+    /// An app started or stopped using the camera or microphone.
+    DeviceAccess,
+    /// Rollback snapshots taken / files restored.
+    Recovery,
     BehaviorAlert,
     ScanStarted,
     ScanFinished,
@@ -269,9 +335,15 @@ pub struct Settings {
     pub entropy_detection: bool,
     /// Network Guard: block connections to known-malicious IP ranges (Windows Filtering Platform).
     pub network_guard: bool,
+    /// Notify when any app starts using the camera or microphone.
+    pub privacy_monitor: bool,
+    /// Keep recent Volume Shadow Copies of the system drive so files hit by
+    /// ransomware can be rolled back.
+    pub rollback_snapshots: bool,
+    pub rollback_interval_hours: u64,
     /// Programs allowed despite Execution Guard.
     pub trusted_apps: Vec<TrustedApp>,
-    /// Install new Sentinel-Lite releases automatically (silently, by the service).
+    /// Install new Vigil releases automatically (silently, by the service).
     pub auto_update_app: bool,
     /// Where releases are looked up. `None` = this project's GitHub releases.
     /// Only GitHub API URLs (or a loopback test server) are accepted.
@@ -313,6 +385,9 @@ impl Default for Settings {
             block_office_children: true,
             entropy_detection: true,
             network_guard: true,
+            privacy_monitor: true,
+            rollback_snapshots: true,
+            rollback_interval_hours: 4,
             trusted_apps: Vec::new(),
             auto_update_app: true,
             app_update_api: None,
@@ -354,7 +429,7 @@ pub enum Request {
     EnableHardening {
         id: String,
     },
-    /// Look for a newer Sentinel-Lite release now and install it if found.
+    /// Look for a newer Vigil release now and install it if found.
     CheckAppUpdate,
     /// Check files / folders on demand and report, without changing anything.
     InspectPaths {
@@ -364,6 +439,28 @@ pub enum Request {
     QuarantinePath {
         path: String,
         threat_name: Option<String>,
+    },
+    /// Disable a scheduled task (needs elevation).
+    DisableTask {
+        name: String,
+    },
+    /// Camera / microphone use recorded by Windows, newest first.
+    GetDeviceUsage,
+    /// Rollback snapshots available, newest first.
+    ListSnapshots,
+    /// Take a rollback snapshot now.
+    CreateSnapshot,
+    /// Files under `folders` (default: every user's Desktop, Documents,
+    /// Pictures, Music, Videos, Downloads) that differ from the snapshot.
+    RollbackPreview {
+        snapshot_id: String,
+        folders: Vec<String>,
+    },
+    /// Put back the snapshot's copy of `paths`; current copies are moved to a
+    /// backup folder first (needs elevation).
+    RollbackRestore {
+        snapshot_id: String,
+        paths: Vec<String>,
     },
     GetEvents {
         limit: u32,
@@ -402,6 +499,10 @@ pub enum Response {
     Settings(Settings),
     Event(SecurityEvent),
     Inspection { reports: Vec<FileReport>, truncated: bool },
+    DeviceUsage(Vec<DeviceUse>),
+    Snapshots(Vec<Snapshot>),
+    RollbackPreview { changes: Vec<FileChange>, truncated: bool },
+    RollbackDone { restored: u32, failed: Vec<String>, backup_dir: Option<String> },
     Ok,
     Error { code: ErrorCode, message: String },
 }
@@ -412,7 +513,7 @@ pub enum ErrorCode {
     Unauthorized,
     /// The operation weakens protection; retry from an elevated (administrator) client.
     ElevationRequired,
-    /// The connecting program is not a trusted Sentinel-Lite component.
+    /// The connecting program is not a trusted Vigil component.
     Forbidden,
     BadRequest,
     NotFound,

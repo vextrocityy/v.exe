@@ -39,6 +39,7 @@ pub fn sanitize(mut s: Settings) -> Settings {
     };
     s.update_interval_hours = s.update_interval_hours.clamp(1, 168);
     s.scheduled_scan_hours = s.scheduled_scan_hours.clamp(1, 24 * 30);
+    s.rollback_interval_hours = s.rollback_interval_hours.clamp(1, 168);
     s.update_url = s
         .update_url
         .take()
@@ -97,7 +98,7 @@ pub fn is_allowed_update_url(u: &str) -> bool {
 /// Empty = the change is neutral or strengthening and needs no elevation.
 pub fn weakenings(old: &Settings, new: &Settings) -> Vec<String> {
     let mut out = Vec::new();
-    let flags: [(&str, bool, bool); 20] = [
+    let flags: [(&str, bool, bool); 22] = [
         ("real-time protection", old.realtime_protection, new.realtime_protection),
         ("Process Guard", old.process_monitor, new.process_monitor),
         ("File Shield", old.file_monitor, new.file_monitor),
@@ -126,6 +127,8 @@ pub fn weakenings(old: &Settings, new: &Settings) -> Vec<String> {
         ("entropy detection", old.entropy_detection, new.entropy_detection),
         ("Network Guard", old.network_guard, new.network_guard),
         ("automatic app updates", old.auto_update_app, new.auto_update_app),
+        ("camera / microphone alerts", old.privacy_monitor, new.privacy_monitor),
+        ("rollback snapshots", old.rollback_snapshots, new.rollback_snapshots),
     ];
     for (name, before, after) in flags {
         if before && !after {

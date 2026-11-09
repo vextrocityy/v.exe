@@ -6,6 +6,7 @@ import { ActivityLog } from "../components/ActivityLog";
 import { Panel } from "../components/Panel";
 import { ScanPanel } from "../components/ScanPanel";
 import { ShieldHero } from "../components/ShieldHero";
+import { DevicesInUse } from "./Privacy";
 import { StatCard } from "../components/StatCard";
 import { api } from "../lib/api";
 import { formatNumber, timeAgo } from "../lib/format";
@@ -36,6 +37,7 @@ export function Dashboard({ status, events, refresh, onSeeAll }: { status: Engin
   };
   return (
     <div className="space-y-6">
+      <DevicesInUse devices={status?.devices_in_use ?? []} compact />
       <div className="grid grid-cols-[1fr_340px] gap-6">
         <Panel className="flex items-center px-8 py-8">
           <ShieldHero status={status} onAcknowledge={async () => { await api.acknowledgeThreats(); await refresh(); }} />

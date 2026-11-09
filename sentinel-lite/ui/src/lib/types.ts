@@ -50,6 +50,44 @@ export interface EngineStatus {
   hardening: HardeningCheck[];
   build: number;
   app_update_status: string | null;
+  devices_in_use: DeviceUse[];
+  last_snapshot: number | null;
+  snapshot_error: string | null;
+}
+
+export type Device = "camera" | "microphone";
+
+export interface DeviceUse {
+  device: Device;
+  app: string;
+  path: string | null;
+  user: string | null;
+  in_use: boolean;
+  last_started: number | null;
+  last_stopped: number | null;
+}
+
+export interface Snapshot {
+  id: string;
+  created_at: number;
+  volume: string;
+  ours: boolean;
+}
+
+export type ChangeKind = "modified" | "deleted";
+
+export interface FileChange {
+  path: string;
+  change: ChangeKind;
+  size_then: number;
+  size_now: number | null;
+  modified_at: number | null;
+  looks_encrypted: boolean;
+}
+
+export interface RollbackPreview {
+  changes: FileChange[];
+  truncated: boolean;
 }
 
 export interface HardeningCheck {
@@ -71,6 +109,8 @@ export type EventKind =
   | "process_blocked"
   | "process_suspended"
   | "persistence_change"
+  | "device_access"
+  | "recovery"
   | "behavior_alert"
   | "scan_started"
   | "scan_finished"
@@ -133,6 +173,9 @@ export interface Settings {
   block_office_children: boolean;
   entropy_detection: boolean;
   network_guard: boolean;
+  privacy_monitor: boolean;
+  rollback_snapshots: boolean;
+  rollback_interval_hours: number;
   trusted_apps: TrustedApp[];
   auto_update_app: boolean;
   app_update_api: string | null;

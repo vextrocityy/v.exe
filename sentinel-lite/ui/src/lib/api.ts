@@ -2,7 +2,7 @@
 // Outside Tauri (plain `npm run dev` in a browser) it falls back to an
 // in-memory mock engine so the UI can be developed without the service.
 
-import type { EngineStatus, Inspection, ProcessAction, QuarantineItem, ScanKind, SecurityEvent, Settings } from "./types";
+import type { DeviceUse, EngineStatus, Inspection, ProcessAction, QuarantineItem, RollbackPreview, ScanKind, SecurityEvent, Settings, Snapshot } from "./types";
 import { mock } from "./mock";
 
 export const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -27,6 +27,13 @@ export const api = {
   pickFiles: () => invoke<string[]>("pick_files"),
   openVirusTotal: (sha256: string) => invoke<void>("open_virustotal", { sha256 }),
   enableHardening: (id: string) => invoke<void>("enable_hardening", { id }),
+  disableTask: (name: string) => invoke<void>("disable_task", { name }),
+  getDeviceUsage: () => invoke<DeviceUse[]>("get_device_usage"),
+  listSnapshots: () => invoke<Snapshot[]>("list_snapshots"),
+  createSnapshot: () => invoke<void>("create_snapshot"),
+  rollbackPreview: (snapshotId: string, folders: string[] = []) => invoke<RollbackPreview>("rollback_preview", { snapshotId, folders }),
+  /** Needs administrator approval; the outcome is reported as a "recovery" event. */
+  rollbackRestore: (snapshotId: string, paths: string[]) => invoke<void>("rollback_restore", { snapshotId, paths }),
   getEvents: (limit = 100, beforeId?: number) => invoke<SecurityEvent[]>("get_events", { limit, beforeId }),
   listQuarantine: () => invoke<QuarantineItem[]>("list_quarantine"),
   restoreQuarantine: (id: string) => invoke<void>("restore_quarantine", { id }),

@@ -1,4 +1,4 @@
-# Releasing Sentinel-Lite
+# Releasing Vigil
 
 ## 1. One-time: update-signing key
 
@@ -60,7 +60,7 @@ installation's settings (or ship it as a default in `settings.json`). Rules:
 ```powershell
 $env:SENTINEL_UPDATE_PUBKEYS = "<public key hex>"
 .\scripts\build-release.ps1
-# -> target\release\bundle\nsis\Sentinel-Lite_<version>_x64-setup.exe
+# -> target\release\bundle\nsis\Vigil_<version>_x64-setup.exe
 ```
 
 CI (`.github/workflows/sentinel-lite.yml`) does the same on every push, then installs it silently,

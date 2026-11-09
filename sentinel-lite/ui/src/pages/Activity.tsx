@@ -6,7 +6,8 @@ import type { SecurityEvent } from "../lib/types";
 const FILTERS = {
   all: () => true,
   threats: (e: SecurityEvent) => ["threat_detected", "threat_quarantined", "process_blocked", "process_suspended", "behavior_alert"].includes(e.kind),
-  system: (e: SecurityEvent) => ["persistence_change", "settings_changed", "signatures_updated", "service_info"].includes(e.kind),
+  system: (e: SecurityEvent) => ["persistence_change", "settings_changed", "signatures_updated", "service_info", "recovery"].includes(e.kind),
+  privacy: (e: SecurityEvent) => e.kind === "device_access",
   scans: (e: SecurityEvent) => e.kind.startsWith("scan_"),
 } as const;
 

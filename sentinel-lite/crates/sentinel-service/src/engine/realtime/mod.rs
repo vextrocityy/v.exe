@@ -5,7 +5,9 @@
 pub mod decoy;
 pub mod file_watch;
 pub mod persistence;
+pub mod privacy;
 pub mod process;
+pub mod tasks;
 
 use super::Engine;
 use sentinel_protocol::ShieldStatus;
@@ -18,6 +20,7 @@ pub const PROCESS_GUARD: &str = "Process Guard";
 pub const FILE_SHIELD: &str = "File Shield";
 pub const PERSISTENCE_WATCH: &str = "Persistence Watch";
 pub const BEHAVIOR_ENGINE: &str = "Behavior Engine";
+pub const PRIVACY_MONITOR: &str = "Privacy Monitor";
 
 pub struct ShieldHandle {
     pub name: &'static str,
@@ -56,10 +59,12 @@ impl RealtimeManager {
         self.stop();
         let s = engine.settings();
         let on = s.realtime_protection;
-        let plan: [(&'static str, bool, StartFn); 3] = [
+        let plan: [(&'static str, bool, StartFn); 4] = [
             (PROCESS_GUARD, on && s.process_monitor, process::start),
             (FILE_SHIELD, on && s.file_monitor, file_watch::start),
             (PERSISTENCE_WATCH, on && s.persistence_monitor, persistence::start),
+            // Windows records camera / microphone use; there is nothing to watch elsewhere.
+            (PRIVACY_MONITOR, on && s.privacy_monitor && cfg!(windows), privacy::start),
         ];
 
         let mut statuses = Vec::new();
@@ -89,7 +94,7 @@ impl RealtimeManager {
         // The behaviour engine piggybacks on the process + file event streams.
         let feeds = statuses
             .iter()
-            .filter(|st| st.running && st.name != PERSISTENCE_WATCH)
+            .filter(|st| st.running && (st.name == PROCESS_GUARD || st.name == FILE_SHIELD))
             .count();
         statuses.push(ShieldStatus {
             name: BEHAVIOR_ENGINE.into(),

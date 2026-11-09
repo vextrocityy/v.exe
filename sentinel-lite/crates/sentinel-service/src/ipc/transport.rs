@@ -12,7 +12,7 @@ pub struct Peer {
     pub image: Option<String>,
     /// Running elevated (administrator) or as SYSTEM: may weaken protection.
     pub elevated: bool,
-    /// A Sentinel-Lite executable from the protected install directory.
+    /// A Vigil executable from the protected install directory.
     pub trusted: bool,
 }
 

@@ -1,14 +1,16 @@
-import { Activity, FileSearch, LayoutDashboard, Lock, Settings, Shield } from "lucide-react";
+import { Activity, Eye, FileSearch, History, LayoutDashboard, Lock, Settings, Shield } from "lucide-react";
 import type { EngineStatus } from "../lib/types";
 import { toneOf } from "../lib/types";
 import { formatBytes } from "../lib/format";
 
-export type Page = "dashboard" | "filecheck" | "activity" | "quarantine" | "settings";
+export type Page = "dashboard" | "filecheck" | "activity" | "privacy" | "recovery" | "quarantine" | "settings";
 
 const NAV: { id: Page; label: string; icon: typeof Shield }[] = [
   { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
   { id: "filecheck", label: "File Check", icon: FileSearch },
   { id: "activity", label: "Activity", icon: Activity },
+  { id: "privacy", label: "Privacy", icon: Eye },
+  { id: "recovery", label: "Recovery", icon: History },
   { id: "quarantine", label: "Quarantine", icon: Lock },
   { id: "settings", label: "Settings", icon: Settings },
 ];
@@ -22,7 +24,7 @@ export function Sidebar({ page, onNavigate, status, connected }: { page: Page; o
       <div className="flex items-center gap-2.5 px-5 py-6">
         <Shield className="h-7 w-7 text-cyan-400 drop-shadow-[0_0_8px_#22d3ee]" />
         <div>
-          <p className="text-base font-semibold tracking-tight text-slate-100">Sentinel-Lite</p>
+          <p className="text-base font-semibold tracking-tight text-slate-100">Vigil</p>
           <p className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Endpoint Protection</p>
         </div>
       </div>
@@ -31,6 +33,7 @@ export function Sidebar({ page, onNavigate, status, connected }: { page: Page; o
         {NAV.map(({ id, label, icon: Icon }) => {
           const active = page === id;
           const badge = id === "quarantine" && status?.quarantine_count ? status.quarantine_count : null;
+          const live = id === "privacy" && (status?.devices_in_use.length ?? 0) > 0;
           return (
             <button
               key={id}
@@ -42,6 +45,7 @@ export function Sidebar({ page, onNavigate, status, connected }: { page: Page; o
               <Icon className="h-4 w-4" />
               <span className="flex-1 text-left">{label}</span>
               {badge && <span className="rounded-full bg-rose-500/20 px-2 text-xs text-rose-300">{badge}</span>}
+              {live && <span className="h-2 w-2 rounded-full bg-amber-400 shadow-[0_0_8px_#fbbf24]" title="Camera or microphone in use" />}
             </button>
           );
         })}

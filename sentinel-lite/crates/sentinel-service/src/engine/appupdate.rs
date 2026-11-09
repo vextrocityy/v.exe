@@ -1,4 +1,4 @@
-//! Self-update: the service installs new Sentinel-Lite releases silently.
+//! Self-update: the service installs new Vigil releases silently.
 //!
 //! Flow: look up the latest GitHub release of this project; if its build
 //! number is higher than ours, download the NSIS installer and the release's
@@ -86,7 +86,7 @@ pub fn parse_release(json: &[u8], api: &str) -> Result<Release> {
         .tag_name
         .strip_prefix(TAG_PREFIX)
         .and_then(|n| n.parse().ok())
-        .with_context(|| format!("release tag {} is not a Sentinel-Lite build", r.tag_name))?;
+        .with_context(|| format!("release tag {} is not a Vigil build", r.tag_name))?;
     let installer = r
         .assets
         .iter()
@@ -183,7 +183,7 @@ pub fn check_and_install(engine: &Engine) -> Result<String> {
     engine.emit(
         EventKind::ServiceInfo,
         Severity::Info,
-        format!("Installing Sentinel-Lite build {}", rel.build),
+        format!("Installing Vigil build {}", rel.build),
         Some(format!(
             "Downloaded and verified {} (SHA-256). Protection restarts in a few seconds.",
             rel.installer_name
@@ -212,7 +212,7 @@ pub fn finish_pending(engine: &Engine) {
             EventKind::ServiceInfo,
             Severity::Info,
             format!("Updated to build {ours}"),
-            Some(format!("Sentinel-Lite updated itself from build {}.", p.from_build)),
+            Some(format!("Vigil updated itself from build {}.", p.from_build)),
             None,
             None,
         );
@@ -230,7 +230,7 @@ pub fn finish_pending(engine: &Engine) {
     }
     if p.relaunch_dashboard {
         if let Some(dir) = crate::platform::install_dir() {
-            let ok = crate::platform::launch_in_user_session(&dir.join("sentinel-lite.exe"), "--minimized");
+            let ok = crate::platform::launch_in_user_session(&dir.join("vigil.exe"), "--minimized");
             tracing::info!(ok, "dashboard relaunch after update");
         }
     }
@@ -249,7 +249,7 @@ mod tests {
     fn release_json(tag: &str, base: &str) -> String {
         format!(
             r#"{{"tag_name":"{tag}","draft":false,"prerelease":false,"assets":[
-              {{"name":"Sentinel-Lite_0.1.0_x64-setup.exe","browser_download_url":"{base}/Sentinel-Lite_0.1.0_x64-setup.exe"}},
+              {{"name":"Vigil_0.1.0_x64-setup.exe","browser_download_url":"{base}/Vigil_0.1.0_x64-setup.exe"}},
               {{"name":"SHA256SUMS.txt","browser_download_url":"{base}/SHA256SUMS.txt"}}]}}"#
         )
     }
@@ -283,12 +283,12 @@ mod tests {
     #[test]
     fn checksum_lines() {
         let sums = format!(
-            "{}  Sentinel-Lite_0.1.0_x64-setup.exe\n{} *other.txt\n",
+            "{}  Vigil_0.1.0_x64-setup.exe\n{} *other.txt\n",
             "a".repeat(64),
             "b".repeat(64)
         );
         assert_eq!(
-            expected_hash(&sums, "Sentinel-Lite_0.1.0_x64-setup.exe"),
+            expected_hash(&sums, "Vigil_0.1.0_x64-setup.exe"),
             Some("a".repeat(64))
         );
         assert_eq!(expected_hash(&sums, "other.txt"), Some("b".repeat(64)));
@@ -300,10 +300,10 @@ mod tests {
         use std::io::{Read, Write};
         let installer = b"MZ fake installer bytes".to_vec();
         let good = format!(
-            "{}  Sentinel-Lite_0.1.0_x64-setup.exe\n",
+            "{}  Vigil_0.1.0_x64-setup.exe\n",
             super::super::hasher::sha256_bytes(&installer)
         );
-        let bad = format!("{}  Sentinel-Lite_0.1.0_x64-setup.exe\n", "0".repeat(64));
+        let bad = format!("{}  Vigil_0.1.0_x64-setup.exe\n", "0".repeat(64));
         for (sums, ok) in [(good, true), (bad, false)] {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());

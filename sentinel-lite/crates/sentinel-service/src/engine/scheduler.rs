@@ -22,6 +22,12 @@ pub fn update_due(now: i64, last_success: i64, last_attempt: i64, interval_hours
     now - last_success >= interval_hours as i64 * 3600 && now - last_attempt >= UPDATE_RETRY_SECS
 }
 
+/// A snapshot is due when the newest is older than the interval; after a
+/// failure, wait an hour before trying again.
+pub fn snapshot_due(now: i64, newest: i64, last_attempt: i64, interval_hours: u64) -> bool {
+    now - newest >= interval_hours.max(1) as i64 * 3600 && now - last_attempt >= 3600
+}
+
 pub fn scan_due(now: i64, last_scan: i64, interval_hours: u64) -> bool {
     now - last_scan >= interval_hours as i64 * 3600
 }
@@ -71,6 +77,21 @@ fn tick(engine: &Arc<Engine>) {
         }
     }
 
+    if s.rollback_snapshots
+        && cfg!(windows)
+        && snapshot_due(
+            now,
+            engine.last_snapshot().unwrap_or(0),
+            counter("last_snapshot_attempt"),
+            s.rollback_interval_hours,
+        )
+    {
+        match engine.create_snapshot() {
+            Ok(snap) => tracing::info!(id = %snap.id, "rollback snapshot taken"),
+            Err(e) => tracing::warn!(error = %e, "rollback snapshot failed"),
+        }
+    }
+
     if s.scheduled_scan
         && !engine.scan_state().is_running()
         && scan_due(now, counter("last_scheduled_scan"), s.scheduled_scan_hours)
@@ -95,6 +116,15 @@ mod tests {
                                                        // last success long ago, but we just failed 5 minutes ago -> wait
         assert!(!update_due(10 * h, 0, 10 * h - 300, 6));
         assert!(update_due(10 * h, 0, 10 * h - UPDATE_RETRY_SECS, 6));
+    }
+
+    #[test]
+    fn snapshot_schedule() {
+        let h = 3600;
+        assert!(snapshot_due(10 * h, 0, 0, 4));
+        assert!(!snapshot_due(10 * h, 8 * h, 8 * h, 4));
+        assert!(!snapshot_due(10 * h, 0, 10 * h - 600, 4)); // failed 10 min ago
+        assert!(snapshot_due(10 * h, 5 * h, 9 * h, 4));
     }
 
     #[test]

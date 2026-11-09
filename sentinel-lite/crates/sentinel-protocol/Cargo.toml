@@ -1,6 +1,6 @@
 [package]
 name = "sentinel-protocol"
-description = "Wire protocol shared by the Sentinel-Lite service and UI"
+description = "Wire protocol shared by the Vigil service and UI"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

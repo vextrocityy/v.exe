@@ -173,7 +173,7 @@ fn agent(url: &str) -> ureq::Agent {
         .tls_config(tls_config())
         .timeout_connect(Duration::from_secs(15))
         .timeout(Duration::from_secs(180))
-        .user_agent(concat!("Sentinel-Lite/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("Vigil/", env!("CARGO_PKG_VERSION")))
         // Honour HTTPS_PROXY for corporate networks, but never proxy a local mirror.
         .try_proxy_from_env(!is_loopback(url))
         .build()

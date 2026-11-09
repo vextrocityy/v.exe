@@ -65,13 +65,37 @@ jobs:
         run: ./scripts/build-release.ps1
       - name: Clippy (dashboard backend)
         run: cargo clippy --locked -p sentinel-ui -- -D warnings
+      - name: Upgrade from Sentinel-Lite (pre-rename) build 18
+        shell: pwsh
+        run: |
+          # The last release before the rename; real installs (and their self-updater) start here.
+          $old = Join-Path $env:TEMP "Sentinel-Lite_0.1.0_x64-setup.exe"
+          Invoke-WebRequest "https://github.com/vextrocityy/v.exe/releases/download/sentinel-lite-build-18/Sentinel-Lite_0.1.0_x64-setup.exe" -OutFile $old
+          Start-Process $old -ArgumentList "/S" -Wait
+          $oldDir = "C:\Program Files\Sentinel-Lite"
+          if ((Get-Service SentinelLite).Status -ne "Running") { throw "old build did not start" }
+          if (-not (Test-Path "$oldDir\sentinel-service.exe")) { throw "old build not installed where expected" }
+          $installer = Get-ChildItem target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          Start-Process $installer.FullName -ArgumentList "/S" -Wait
+          $deadline = (Get-Date).AddSeconds(60)
+          while ((Get-Date) -lt $deadline -and (Test-Path $oldDir)) { Start-Sleep 2 }
+          $image = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\SentinelLite").ImagePath
+          "Service image after upgrade: $image"
+          if ($image -notlike "*\Program Files\Vigil\sentinel-service.exe*") { throw "service still points at the old folder" }
+          if ((Get-Service SentinelLite).Status -ne "Running") { throw "service not running after upgrade" }
+          if (Test-Path $oldDir) { Get-ChildItem $oldDir -Recurse | Out-Host; throw "old Sentinel-Lite folder left behind" }
+          $run = Get-ItemProperty "HKLM:\Software\Microsoft\Windows\CurrentVersion\Run"
+          if ($run."Sentinel-Lite") { throw "old autostart entry left behind" }
+          if (-not $run."Vigil") { throw "Vigil autostart entry missing" }
+          if (Test-Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Sentinel-Lite") { throw "old uninstall entry left behind" }
+          "Upgrade from Sentinel-Lite build 18 OK"
       - name: Silent install, verify, uninstall
         shell: pwsh
         run: |
           $installer = Get-ChildItem target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
           Start-Process $installer.FullName -ArgumentList "/S" -Wait
-          $dir = "C:\Program Files\Sentinel-Lite"
-          foreach ($f in "sentinel-lite.exe", "sentinel-service.exe", "signatures\core.json", "rules\sentinel-test.yar") {
+          $dir = "C:\Program Files\Vigil"
+          foreach ($f in "vigil.exe", "sentinel-service.exe", "signatures\core.json", "rules\sentinel-test.yar") {
             if (-not (Test-Path "$dir\$f")) { throw "missing $f" }
           }
           $svc = Get-Service SentinelLite
@@ -89,9 +113,9 @@ jobs:
           Copy-Item "$dir\sentinel-service.exe" $rogue
           $out = & $rogue status 2>&1 | Out-String
           if ($LASTEXITCODE -eq 0) { throw "untrusted client was allowed to connect" }
-          if ($out -notmatch "not a trusted Sentinel-Lite component") { throw "unexpected refusal: $out" }
+          if ($out -notmatch "not a trusted Vigil component") { throw "unexpected refusal: $out" }
           "Untrusted client refused as expected"
-          if (-not (Get-ItemProperty "HKLM:\Software\Microsoft\Windows\CurrentVersion\Run")."Sentinel-Lite") { throw "autostart entry missing" }
+          if (-not (Get-ItemProperty "HKLM:\Software\Microsoft\Windows\CurrentVersion\Run")."Vigil") { throw "autostart entry missing" }
           # --- Self-update: serve a "newer" release locally and let the service install it ---
           $svc = "$dir\sentinel-service.exe"
           $build = [int]((& $svc version) -replace '.*build (\d+).*', '$1')
@@ -135,7 +159,7 @@ jobs:
           Stop-Job $server; Remove-Job $server -Force
           if (-not $done) { throw "self-update did not complete (no post-update event)" }
           $ev | Select-Object -First 6 | Format-Table severity, title -AutoSize | Out-Host
-          if (-not ($ev | Where-Object { $_.title -eq "Installing Sentinel-Lite build $next" })) { throw "updater never started the installer" }
+          if (-not ($ev | Where-Object { $_.title -eq "Installing Vigil build $next" })) { throw "updater never started the installer" }
           if ((Get-Service SentinelLite).Status -ne "Running") { throw "service not running after self-update" }
           if ((Get-Process sentinel-service).StartTime -le $before) { throw "service was not restarted by the update" }
           "Self-update OK: downloaded, SHA-256 verified, installed silently, service restarted"
@@ -149,7 +173,7 @@ jobs:
           if (Get-Service SentinelLite -ErrorAction SilentlyContinue) {
             "--- diagnostics ---"
             sc.exe queryex SentinelLite | Out-Host
-            Get-Process sentinel*, Sentinel-Lite*, uninstall*, Un_A* -ErrorAction SilentlyContinue | Format-Table Id, ProcessName, StartTime, Path -AutoSize | Out-Host
+            Get-Process sentinel*, vigil*, uninstall*, Un_A* -ErrorAction SilentlyContinue | Format-Table Id, ProcessName, StartTime, Path -AutoSize | Out-Host
             "install dir:"; Get-ChildItem $dir -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name | Out-Host
             Get-ChildItem "$env:ProgramData\SentinelLite\logs" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime | Select-Object -Last 1 | ForEach-Object { Get-Content $_.FullName -Tail 40 } | Out-Host
             throw "service still registered 60 s after uninstall"
@@ -188,7 +212,8 @@ jobs:
             echo "Automated build of commit ${GITHUB_SHA::7} on ${GITHUB_REF_NAME}."
             echo
             echo "This build passed the Windows smoke test (real service install, File Shield, Process Guard,"
-            echo "YARA, archive scanning, ransomware decoys, startup clean-up) and the silent install/uninstall test."
+            echo "YARA, archive scanning, ransomware decoys and rollback, startup clean-up, scheduled tasks) and the"
+            echo "silent install / upgrade-from-Sentinel-Lite / uninstall test. Vigil was formerly called Sentinel-Lite."
             echo
             echo "**Personal, unsigned test build.** Windows SmartScreen will warn: choose *More info → Run anyway*."
             echo "Keep Microsoft Defender enabled alongside it."
@@ -202,7 +227,7 @@ jobs:
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
           target_commitish: ${{ github.sha }}
-          name: Sentinel-Lite build ${{ github.run_number }}
+          name: Vigil build ${{ github.run_number }}
           body_path: notes.md
           make_latest: true
           files: |

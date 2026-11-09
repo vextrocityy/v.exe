@@ -1,6 +1,6 @@
 [package]
 name = "sentinel-ui"
-description = "Sentinel-Lite dashboard (Tauri shell). Holds no protection logic: it only talks to the service over IPC."
+description = "Vigil dashboard (Tauri shell). Holds no protection logic: it only talks to the service over IPC."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

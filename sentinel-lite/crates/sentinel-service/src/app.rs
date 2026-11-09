@@ -104,7 +104,7 @@ pub async fn run(paths: AppPaths, shutdown: impl std::future::Future<Output = ()
     engine.emit(
         EventKind::ServiceInfo,
         Severity::Info,
-        "Sentinel-Lite engine started",
+        "Vigil engine started",
         Some(format!("{} signatures loaded", engine.db.signature_count())),
         None,
         None,

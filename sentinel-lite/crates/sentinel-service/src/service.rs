@@ -15,7 +15,7 @@ use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 use windows_service::{define_windows_service, service_dispatcher};
 
 pub const SERVICE_NAME: &str = "SentinelLite";
-const DISPLAY_NAME: &str = "Sentinel-Lite Endpoint Protection";
+const DISPLAY_NAME: &str = "Vigil Endpoint Protection";
 const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
 
 define_windows_service!(ffi_service_main, service_main);
@@ -124,7 +124,7 @@ pub fn install() -> Result<()> {
         }
         Err(_) => manager.create_service(&info, access)?,
     };
-    service.set_description("Real-time malware protection engine for Sentinel-Lite.")?;
+    service.set_description("Real-time malware protection engine for Vigil.")?;
     // Restart automatically if the engine ever crashes.
     service.update_failure_actions(ServiceFailureActions {
         reset_period: ServiceFailureResetPeriod::After(Duration::from_secs(86_400)),

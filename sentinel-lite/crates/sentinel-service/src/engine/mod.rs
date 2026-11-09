@@ -9,6 +9,7 @@ pub mod inspect;
 pub mod netguard;
 pub mod quarantine;
 pub mod realtime;
+pub mod rollback;
 pub mod scanner;
 pub mod scheduler;
 pub mod targets;
@@ -90,6 +91,13 @@ pub struct Engine {
     cpu_sample: Mutex<(Instant, Option<std::time::Duration>, Option<f32>)>,
     app_update_status: Mutex<Option<String>>,
     app_update_running: AtomicBool,
+    devices_in_use: Mutex<Vec<DeviceUse>>,
+    /// Rollback snapshots this app created.
+    owned_snapshots: Mutex<rollback::Owned>,
+    snapshot_error: Mutex<Option<String>>,
+    snapshot_running: AtomicBool,
+    /// A rollback restore is writing files: entropy alerts would be our own doing.
+    restore_running: AtomicBool,
     started: Instant,
 }
 
@@ -102,6 +110,7 @@ impl Engine {
         let quarantine = Quarantine::new(paths.quarantine.clone())?;
         let decoys = realtime::decoy::Decoys::load(&db);
         let (events, _) = broadcast::channel(256);
+        let owned_snapshots = rollback::Owned::load(&paths.data.join("snapshots.json"));
         Ok(Arc::new(Self {
             db,
             quarantine,
@@ -125,6 +134,11 @@ impl Engine {
             cpu_sample: Mutex::new((Instant::now(), crate::platform::own_cpu_time(), None)),
             app_update_status: Mutex::new(None),
             app_update_running: AtomicBool::new(false),
+            devices_in_use: Mutex::new(Vec::new()),
+            owned_snapshots: Mutex::new(owned_snapshots),
+            snapshot_error: Mutex::new(None),
+            snapshot_running: AtomicBool::new(false),
+            restore_running: AtomicBool::new(false),
             started: Instant::now(),
         }))
     }
@@ -812,7 +826,7 @@ impl Engine {
             .any(|t| t.sha256 == sha256)
     }
 
-    /// Check for (and install) a newer Sentinel-Lite release. Blocking.
+    /// Check for (and install) a newer Vigil release. Blocking.
     pub fn check_app_update(&self) -> Result<String, String> {
         if self.app_update_running.swap(true, Ordering::AcqRel) {
             return Err("an app update check is already running".into());
@@ -955,12 +969,13 @@ impl Engine {
             Severity::Critical,
             "Ransomware behaviour: a decoy file was changed",
             Some(format!(
-                "A hidden decoy file was {}. Legitimate programs never touch it.",
+                "A hidden decoy file was {}. Legitimate programs never touch it.{}",
                 if state == Some(realtime::decoy::State::Missing) {
                     "deleted or renamed"
                 } else {
                     "modified"
-                }
+                },
+                self.rollback_hint()
             )),
             Some(path),
             None,
@@ -1017,6 +1032,9 @@ impl Engine {
     /// File Shield saw a burst of rewrites across folders and most of the
     /// sampled files now look encrypted (high entropy, not a compressed format).
     pub fn on_mass_encryption(self: &Arc<Self>, samples: Vec<PathBuf>, encrypted: usize) {
+        if self.restore_running.load(Ordering::SeqCst) {
+            return; // a rollback is rewriting files: that burst is ours
+        }
         let e = self.clone();
         let _ = std::thread::Builder::new().name("entropy-response".into()).spawn(move || {
             crate::util::contain("entropy response", || {
@@ -1034,9 +1052,10 @@ impl Engine {
                     "Ransomware behaviour: files are being encrypted",
                     Some(format!(
                         "Many files across several folders were rewritten in seconds, and {encrypted} of {} sampled now \
-                         contain encrypted-looking data. Recent: {}",
+                         contain encrypted-looking data. Recent: {}.{}",
                         samples.len(),
-                        samples.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
+                        samples.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", "),
+                        e.rollback_hint()
                     )),
                     Some(&first),
                     None,
@@ -1158,6 +1177,212 @@ impl Engine {
         Ok(format!("YARA rules updated: {line}"))
     }
 
+    // ----- ransomware rollback -------------------------------------------------------
+
+    fn snapshots_file(&self) -> PathBuf {
+        self.paths.data.join("snapshots.json")
+    }
+
+    pub fn last_snapshot(&self) -> Option<i64> {
+        lock(&self.owned_snapshots).newest()
+    }
+
+    /// Take a snapshot of the system drive now and prune our older ones.
+    pub fn create_snapshot(&self) -> Result<Snapshot, String> {
+        if self.snapshot_running.swap(true, Ordering::SeqCst) {
+            return Err("a snapshot is already being taken".into());
+        }
+        let result = self.create_snapshot_inner();
+        self.snapshot_running.store(false, Ordering::SeqCst);
+        *lock(&self.snapshot_error) = result.as_ref().err().cloned();
+        result
+    }
+
+    fn create_snapshot_inner(&self) -> Result<Snapshot, String> {
+        self.db.set_counter("last_snapshot_attempt", now_unix());
+        let volume = rollback::system_volume();
+        let id = rollback::create(&volume).map_err(|e| format!("Could not take a snapshot: {e:#}"))?;
+        let taken = now_unix();
+        let stale: Vec<String> = {
+            let mut owned = lock(&self.owned_snapshots);
+            owned.ids.push((id.clone(), taken));
+            owned.ids.sort_by_key(|(_, t)| std::cmp::Reverse(*t));
+            let keep = owned.ids.len().min(rollback::KEEP);
+            let stale = owned.ids.split_off(keep);
+            if let Err(e) = owned.save(&self.snapshots_file()) {
+                tracing::warn!(error = %e, "could not record snapshot");
+            }
+            stale.into_iter().map(|(id, _)| id).collect()
+        };
+        for old in stale {
+            if let Err(e) = rollback::delete(&old) {
+                tracing::warn!(id = %old, error = %format!("{e:#}"), "could not delete old snapshot");
+            }
+        }
+        self.emit(
+            EventKind::Recovery,
+            Severity::Info,
+            "Rollback snapshot taken",
+            Some(format!(
+                "Files on {volume} can be rolled back to this point if ransomware strikes.                  The newest {} snapshots are kept.",
+                rollback::KEEP
+            )),
+            None,
+            None,
+        );
+        Ok(Snapshot {
+            id,
+            created_at: taken,
+            volume,
+            ours: true,
+        })
+    }
+
+    /// All snapshots on the machine (ours flagged), newest first. Forgets our
+    /// snapshots that Windows has since deleted (it prunes when space runs low).
+    pub fn list_snapshots(&self) -> Result<Vec<rollback::ShadowCopy>, String> {
+        let mut all = rollback::list().map_err(|e| format!("Could not list snapshots: {e:#}"))?;
+        let mut owned = lock(&self.owned_snapshots);
+        let live: std::collections::HashSet<String> = all.iter().map(|s| s.snapshot.id.clone()).collect();
+        let before = owned.ids.len();
+        owned.ids.retain(|(id, _)| live.contains(id));
+        if owned.ids.len() != before {
+            let _ = owned.save(&self.snapshots_file());
+        }
+        for s in &mut all {
+            s.snapshot.ours = owned.ids.iter().any(|(id, _)| *id == s.snapshot.id);
+        }
+        all.sort_by_key(|s| std::cmp::Reverse(s.snapshot.created_at));
+        Ok(all)
+    }
+
+    fn find_snapshot(&self, id: &str) -> Result<rollback::ShadowCopy, String> {
+        if !rollback::valid_id(id) {
+            return Err("invalid snapshot id".into());
+        }
+        self.list_snapshots()?
+            .into_iter()
+            .find(|s| s.snapshot.id == id)
+            .ok_or_else(|| "That snapshot no longer exists (Windows may have removed it to free space).".into())
+    }
+
+    /// Files that differ from the snapshot (encrypted-looking first).
+    pub fn rollback_preview(&self, id: &str, folders: Vec<String>) -> Result<(Vec<FileChange>, bool), String> {
+        let shadow = self.find_snapshot(id)?;
+        let profiles = targets::user_profiles();
+        let folders: Vec<PathBuf> = if folders.is_empty() {
+            rollback::default_folders(&profiles)
+        } else {
+            folders.into_iter().map(PathBuf::from).filter(|p| p.is_dir()).collect()
+        };
+        let skip = |p: &Path| {
+            self.is_decoy(p) || p.to_string_lossy().contains(rollback::BACKUP_DIR_NAME)
+        };
+        let mut changes = Vec::new();
+        for folder in folders {
+            let Some(snap) = rollback::snapshot_path(&shadow.device, &shadow.snapshot.volume, &folder) else {
+                continue; // on another drive
+            };
+            changes.extend(rollback::diff_folder(&folder, &snap, shadow.snapshot.created_at, &skip));
+        }
+        rollback::sort_changes(&mut changes);
+        let truncated = changes.len() > rollback::MAX_CHANGES;
+        changes.truncate(rollback::MAX_CHANGES);
+        Ok((changes, truncated))
+    }
+
+    /// Put the snapshot's copies of `paths` back. Only files inside a user
+    /// profile can be restored; the current copies go to a backup folder.
+    pub fn rollback_restore(&self, id: &str, paths: Vec<String>) -> Result<(u32, Vec<String>, Option<String>), String> {
+        let shadow = self.find_snapshot(id)?;
+        let profiles = targets::user_profiles();
+        let stamp = rollback::stamp(now_unix());
+        self.restore_running.store(true, Ordering::SeqCst);
+        let mut restored = 0u32;
+        let mut failed = Vec::new();
+        let mut backup_root: Option<PathBuf> = None;
+        for p in paths {
+            let live = PathBuf::from(&p);
+            let outcome = (|| -> Result<(), String> {
+                if !rollback::allowed(&live, &profiles) || self.is_decoy(&live) {
+                    return Err("not in a user folder".into());
+                }
+                let snap = rollback::snapshot_path(&shadow.device, &shadow.snapshot.volume, &live)
+                    .ok_or("not on the snapshot's drive")?;
+                let backup = rollback::backup_path(&live, &profiles, &stamp);
+                rollback::restore_file(&snap, &live, backup.as_deref()).map_err(|e| e.to_string())?;
+                if live.exists() && backup_root.is_none() {
+                    backup_root = backup.and_then(|b| {
+                        profiles
+                            .iter()
+                            .find(|pr| b.starts_with(pr))
+                            .map(|pr| pr.join(rollback::BACKUP_DIR_NAME).join(&stamp))
+                    });
+                }
+                Ok(())
+            })();
+            match outcome {
+                Ok(()) => restored += 1,
+                Err(e) => failed.push(format!("{p}: {e}")),
+            }
+        }
+        self.restore_running.store(false, Ordering::SeqCst);
+        let backup_dir = backup_root.filter(|b| b.exists()).map(|b| b.display().to_string());
+        self.emit(
+            EventKind::Recovery,
+            if failed.is_empty() { Severity::Info } else { Severity::Medium },
+            format!("Restored {restored} file(s) from the snapshot of {}", rollback::stamp(shadow.snapshot.created_at)),
+            Some(match (&backup_dir, failed.len()) {
+                (Some(b), 0) => format!("The versions they replaced were moved to {b}."),
+                (Some(b), n) => format!("{n} could not be restored. The versions that were replaced are in {b}."),
+                (None, 0) => "Nothing was overwritten.".into(),
+                (None, n) => format!("{n} could not be restored: {}", failed.join("; ")),
+            }),
+            None,
+            None,
+        );
+        Ok((restored, failed, backup_dir))
+    }
+
+    /// One sentence for ransomware alerts: where the user can recover from.
+    fn rollback_hint(&self) -> String {
+        match self.last_snapshot() {
+            Some(t) => format!(
+                " Files changed since the snapshot of {} can be restored: open Recovery.",
+                rollback::stamp(t)
+            ),
+            None => String::new(),
+        }
+    }
+
+    /// Disable a scheduled task the user decided they do not want. Only names of
+    /// tasks that actually exist are passed on to `schtasks`.
+    pub fn disable_task(&self, name: &str) -> Result<(), String> {
+        let mut map = std::collections::HashMap::new();
+        realtime::tasks::collect(&realtime::tasks::tasks_dir(), &mut map);
+        if !map.contains_key(&format!("{}{name}", realtime::tasks::KEY_PREFIX)) {
+            return Err(format!("no scheduled task named {name}"));
+        }
+        realtime::tasks::set_enabled(name, false).map_err(|e| format!("{e:#}"))?;
+        self.emit(
+            EventKind::PersistenceChange,
+            Severity::Info,
+            "Scheduled task disabled",
+            Some(format!(
+                "{name} will no longer run. To undo, enable it again in Task Scheduler."
+            )),
+            None,
+            None,
+        );
+        Ok(())
+    }
+
+    // ----- privacy ---------------------------------------------------------------
+
+    pub fn set_devices_in_use(&self, v: Vec<DeviceUse>) {
+        *lock(&self.devices_in_use) = v;
+    }
+
     pub fn shutdown(&self) {
         if let Some((stop, handle)) = lock(&self.scheduler).take() {
             stop.store(true, Ordering::Relaxed);
@@ -1232,6 +1457,9 @@ impl Engine {
             hardening: crate::platform::hardening_checks(),
             build: appupdate::build(),
             app_update_status: lock(&self.app_update_status).clone(),
+            devices_in_use: lock(&self.devices_in_use).clone(),
+            last_snapshot: self.last_snapshot(),
+            snapshot_error: lock(&self.snapshot_error).clone(),
         }
     }
 }

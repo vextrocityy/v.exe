@@ -70,7 +70,7 @@ async fn handle<S: Stream>(engine: Arc<Engine>, token: Arc<AuthToken>, mut s: S,
             tracing::warn!(pid = ?peer.pid, image = ?peer.image, "rejected IPC client outside the install directory");
             let _ = write_msg(
                 &mut s,
-                &Response::error(ErrorCode::Forbidden, "not a trusted Sentinel-Lite component"),
+                &Response::error(ErrorCode::Forbidden, "not a trusted Vigil component"),
             )
             .await;
             return Ok(());
@@ -154,6 +154,12 @@ async fn dispatch(engine: &Arc<Engine>, req: Request, peer: &Peer) -> Response {
         Request::QuarantinePath { .. } if !peer.elevated => {
             return elevation_required("moves a file of your choice into quarantine");
         }
+        Request::DisableTask { .. } if !peer.elevated => {
+            return elevation_required("turns off a scheduled task, which can be one Windows needs");
+        }
+        Request::RollbackRestore { .. } if !peer.elevated => {
+            return elevation_required("overwrites files with older copies from a snapshot");
+        }
         Request::TrustApp { .. } if !peer.elevated => {
             return elevation_required("lets an unsigned program run from a risky folder");
         }
@@ -178,6 +184,48 @@ async fn dispatch(engine: &Arc<Engine>, req: Request, peer: &Peer) -> Response {
     }
     let e = engine.clone();
     let result = match req {
+        Request::DisableTask { name } => {
+            blocking(move || match e.disable_task(&name) {
+                Ok(()) => Response::Ok,
+                Err(m) => Response::error(ErrorCode::BadRequest, m),
+            })
+            .await
+        }
+        Request::GetDeviceUsage => {
+            blocking(|| Response::DeviceUsage(crate::engine::realtime::privacy::read_all())).await
+        }
+        Request::ListSnapshots => {
+            blocking(move || match e.list_snapshots() {
+                Ok(v) => Response::Snapshots(v.into_iter().map(|s| s.snapshot).collect()),
+                Err(m) => Response::error(ErrorCode::Internal, m),
+            })
+            .await
+        }
+        Request::CreateSnapshot => {
+            blocking(move || match e.create_snapshot() {
+                Ok(_) => Response::Ok,
+                Err(m) => Response::error(ErrorCode::Busy, m),
+            })
+            .await
+        }
+        Request::RollbackPreview { snapshot_id, folders } => {
+            blocking(move || match e.rollback_preview(&snapshot_id, folders) {
+                Ok((changes, truncated)) => Response::RollbackPreview { changes, truncated },
+                Err(m) => Response::error(ErrorCode::BadRequest, m),
+            })
+            .await
+        }
+        Request::RollbackRestore { snapshot_id, paths } => {
+            blocking(move || match e.rollback_restore(&snapshot_id, paths) {
+                Ok((restored, failed, backup_dir)) => Response::RollbackDone {
+                    restored,
+                    failed,
+                    backup_dir,
+                },
+                Err(m) => Response::error(ErrorCode::BadRequest, m),
+            })
+            .await
+        }
         Request::Auth { .. } => Ok(Response::error(ErrorCode::BadRequest, "already authenticated")),
         Request::Subscribe => unreachable!("handled by caller"),
         Request::GetStatus => blocking(move || Response::Status(e.status())).await,

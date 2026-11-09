@@ -169,7 +169,36 @@ fn handle_start(engine: &Engine, images: &mut HashMap<u32, PathBuf>, ev: &Proces
         }
     }
 
-    // 3) Execution Guard: unsigned programs from Downloads / Temp / AppData.
+    // 3) Backups: ransomware deletes shadow copies / disables recovery before encrypting.
+    //    (Our own snapshot pruning runs as a child of this service and is exempt.)
+    if (settings.rollback_snapshots || settings.ransomware_suspend) && ev.ppid != std::process::id() {
+        if let Some(what) = platform::command_line(ev.pid)
+            .as_deref()
+            .and_then(crate::engine::rollback::is_backup_deletion)
+        {
+            if platform::terminate(ev.pid) {
+                engine.emit(
+                    EventKind::ProcessBlocked,
+                    Severity::Critical,
+                    "Blocked an attempt to delete backups",
+                    Some(format!(
+                        "{what}. Ransomware does this before encrypting files so they cannot be recovered. \
+                         The program that started it ({}) deserves a scan.",
+                        parent
+                            .as_deref()
+                            .and_then(|p| p.file_name())
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| "unknown".into())
+                    )),
+                    Some(&image),
+                    Some(ev.pid),
+                );
+                return;
+            }
+        }
+    }
+
+    // 4) Execution Guard: unsigned programs from Downloads / Temp / AppData.
     if settings.block_untrusted_risky {
         if let Some(folder) = heuristics::risky_location(&image) {
             let trusted = image_sha.as_deref().is_some_and(|h| engine.is_trusted_app(h));
@@ -190,7 +219,7 @@ fn handle_start(engine: &Engine, images: &mut HashMap<u32, PathBuf>, ev: &Proces
         }
     }
 
-    // 4) Behavioural assessment (alert only).
+    // 5) Behavioural assessment (alert only).
     if settings.behavior_monitor {
         let cmd = platform::command_line(ev.pid);
         let a = heuristics::assess_process(&ProcessContext {

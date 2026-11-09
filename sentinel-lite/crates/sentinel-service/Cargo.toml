@@ -1,6 +1,6 @@
 [package]
 name = "sentinel-service"
-description = "Sentinel-Lite endpoint protection engine (Windows service)"
+description = "Vigil endpoint protection engine (Windows service)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

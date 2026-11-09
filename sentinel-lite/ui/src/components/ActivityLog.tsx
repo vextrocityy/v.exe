@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Activity, AlertOctagon, Ban, Bug, DownloadCloud, FileWarning, Info, KeyRound, Lock, PauseCircle, Play, ScanLine, Settings2, Skull } from "lucide-react";
+import { Activity, AlertOctagon, Ban, Bug, Camera, DownloadCloud, FileWarning, History, Info, KeyRound, Lock, Mic, PauseCircle, Play, ScanLine, Settings2, Skull } from "lucide-react";
 import { api } from "../lib/api";
 import type { EventKind, SecurityEvent, Severity } from "../lib/types";
 import { shortPath, timeAgo } from "../lib/format";
@@ -10,6 +10,8 @@ const KIND_ICON: Record<EventKind, typeof Info> = {
   process_blocked: Ban,
   process_suspended: PauseCircle,
   persistence_change: KeyRound,
+  device_access: Camera,
+  recovery: History,
   behavior_alert: AlertOctagon,
   scan_started: ScanLine,
   scan_finished: ScanLine,
@@ -35,7 +37,7 @@ export function ActivityLog({ events, limit, compact }: { events: SecurityEvent[
   return (
     <ul className="divide-y divide-slate-800/70">
       {rows.map((e) => {
-        const Icon = KIND_ICON[e.kind] ?? Info;
+        const Icon = e.kind === "device_access" && e.title.startsWith("Microphone") ? Mic : KIND_ICON[e.kind] ?? Info;
         return (
           <li key={e.id} className="flex items-start gap-3 px-5 py-3 hover:bg-slate-800/30">
             <span className={`mt-0.5 grid h-7 w-7 shrink-0 place-items-center rounded-md ${SEVERITY[e.severity]}`}>
@@ -50,6 +52,7 @@ export function ActivityLog({ events, limit, compact }: { events: SecurityEvent[
               {!compact && e.detail && <p className="mt-0.5 text-xs text-slate-400">{e.detail}</p>}
               {e.kind === "process_suspended" && e.pid != null && <SuspendedActions pid={e.pid} />}
               {e.kind === "process_blocked" && e.title.startsWith("Blocked unsigned program") && e.path && <AllowButton path={e.path} />}
+              {!compact && e.kind === "persistence_change" && /^(New scheduled task|Scheduled task changed)/.test(e.title) && e.path && <DisableTaskButton name={e.path} />}
             </div>
           </li>
         );
@@ -108,6 +111,32 @@ function AllowButton({ path }: { path: string }) {
     <div className="mt-2 flex items-center gap-2">
       <button disabled={state === "busy"} onClick={allow} title="Requires administrator approval" className="rounded-md border border-slate-700 px-2.5 py-1 text-xs text-slate-300 hover:border-emerald-400/50 hover:text-emerald-300 disabled:opacity-50">
         Always allow this program
+      </button>
+      {err && <span className="text-xs text-rose-400">{err}</span>}
+    </div>
+  );
+}
+
+/** A new / changed scheduled task: let the user switch it off. */
+function DisableTaskButton({ name }: { name: string }) {
+  const [state, setState] = useState<"idle" | "busy" | "done">("idle");
+  const [err, setErr] = useState<string | null>(null);
+  const disable = async () => {
+    setState("busy");
+    setErr(null);
+    try {
+      await api.disableTask(name);
+      setState("done");
+    } catch (e) {
+      setState("idle");
+      setErr(String(e));
+    }
+  };
+  if (state === "done") return <p className="mt-2 text-xs text-emerald-400">Disabled. Re-enable it in Task Scheduler if you need it.</p>;
+  return (
+    <div className="mt-2 flex items-center gap-2">
+      <button disabled={state === "busy"} onClick={disable} title="Requires administrator approval" className="rounded-md border border-slate-700 px-2.5 py-1 text-xs text-slate-300 hover:border-rose-400/50 hover:text-rose-300 disabled:opacity-50">
+        Disable this task
       </button>
       {err && <span className="text-xs text-rose-400">{err}</span>}
     </div>

@@ -32,7 +32,7 @@ export function ShieldHero({ status, onAcknowledge }: { status: EngineStatus | n
         <p className="text-xs font-semibold uppercase tracking-[0.25em] text-slate-500">System Status</p>
         <h1 className={`mt-1 text-4xl font-semibold tracking-tight ${t.color}`}>{status ? t.label : "Connecting…"}</h1>
         <p className="mt-2 max-w-md text-sm text-slate-400">
-          {!status ? "Waiting for the Sentinel-Lite service." : tone === "warn" ? reasons.join(" · ") : t.sub}
+          {!status ? "Waiting for the Vigil service." : tone === "warn" ? reasons.join(" · ") : t.sub}
         </p>
         {tone === "danger" && (
           <button onClick={onAcknowledge} className="mt-4 rounded-lg border border-rose-400/40 px-3 py-1.5 text-sm text-rose-300 hover:bg-rose-500/10">

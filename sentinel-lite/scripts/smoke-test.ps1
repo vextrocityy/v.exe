@@ -15,6 +15,14 @@ function Invoke-Svc { $out = & $svc @args; if ($LASTEXITCODE) { throw "sentinel-
 function Status { (Invoke-Svc status | Out-String | ConvertFrom-Json).data }
 function Events { (Invoke-Svc events 100 | Out-String | ConvertFrom-Json).data }
 function Quarantine { (Invoke-Svc quarantine | Out-String | ConvertFrom-Json).data }
+function Hex($Request) { -join ([Text.Encoding]::UTF8.GetBytes(($Request | ConvertTo-Json -Depth 8 -Compress)) | ForEach-Object { $_.ToString("x2") }) }
+# Any IPC request; returns the response's data (throws on an error response).
+function Req($Request) {
+    $r = (Invoke-Svc request (Hex $Request)) | Out-String | ConvertFrom-Json
+    if ($r.type -eq "error") { throw "request $($Request.type) failed: $($r.data.message)" }
+    $r.data
+}
+function Task-Enabled([string]$Name) { "$(([xml](schtasks /Query /TN $Name /XML | Out-String)).Task.Settings.Enabled)" -ne "false" }
 function Invoke-Elevated($Request) {
     $json = $Request | ConvertTo-Json -Depth 8 -Compress
     $hex = -join ([Text.Encoding]::UTF8.GetBytes($json) | ForEach-Object { $_.ToString("x2") })
@@ -57,12 +65,15 @@ try {
     $procHash = New-UniqueCopy "$env:SystemRoot\System32\PING.EXE" $procExe
     $startupExe = Join-Path $work "startup-agent.exe"
     $startupHash = New-UniqueCopy "$env:SystemRoot\System32\PING.EXE" $startupExe
+    $taskExe = Join-Path $work "task-agent.exe"
+    $taskHash = New-UniqueCopy "$env:SystemRoot\System32\PING.EXE" $taskExe
 
     New-Item -ItemType Directory -Force "$data\signatures" | Out-Null
     @{ name = "smoke-test"; version = "1"; signatures = @(
         @{ sha256 = $fileHash; name = "Smoke.File"; severity = "high" },
         @{ sha256 = $procHash; name = "Smoke.Process"; severity = "critical" },
-        @{ sha256 = $startupHash; name = "Smoke.Startup"; severity = "high" }) } |
+        @{ sha256 = $startupHash; name = "Smoke.Startup"; severity = "high" },
+        @{ sha256 = $taskHash; name = "Smoke.Task"; severity = "high" }) } |
         ConvertTo-Json -Depth 4 | Set-Content "$data\signatures\smoke.json" -Encoding ascii
     # Network Guard test entry: TEST-NET-1 (RFC 5737), never routed on the internet.
     New-Item -ItemType Directory -Force "$data\network" | Out-Null
@@ -162,6 +173,63 @@ try {
     Invoke-Elevated @{ type = "restore_quarantine"; data = @{ id = $item.id } }
     Wait-Until { (Test-Path $startupExe) -and (Get-ItemProperty $runKey)."SentinelSmoke" } "restore put the file and its Run-key entry back"
     Remove-ItemProperty $runKey -Name "SentinelSmoke"
+
+    # --- Scheduled Tasks: new task reported, its program quarantined, task disabled ---
+    $taskName = "VigilSmokeTask"
+    schtasks /Create /TN $taskName /TR "`"$taskExe`" -n 1 127.0.0.1" /SC ONLOGON /RU SYSTEM /F | Out-Host
+    Wait-Until { Events | Where-Object { $_.title -eq "New scheduled task" -and $_.path -eq "\$taskName" } } "Persistence Watch reported the new scheduled task" 90
+    Wait-Until { -not (Test-Path $taskExe) } "the task's program was scanned and quarantined" 30
+    Wait-Until { -not (Task-Enabled $taskName) } "startup clean-up disabled the task" 30
+    $item = Quarantine | Where-Object { $_.original_path -eq $taskExe } | Select-Object -First 1
+    Invoke-Elevated @{ type = "restore_quarantine"; data = @{ id = $item.id } }
+    Wait-Until { (Test-Path $taskExe) -and (Task-Enabled $taskName) } "restoring the file re-enabled its task"
+    Invoke-Elevated @{ type = "disable_task"; data = @{ name = "\$taskName" } }
+    Wait-Until { -not (Task-Enabled $taskName) } "Disable task (dashboard button path) works"
+    schtasks /Delete /TN $taskName /F | Out-Null
+
+    # --- Backups: commands that delete shadow copies are stopped -------------------
+    # (echo only: nothing is really deleted even if the rule failed)
+    Start-Process "$env:SystemRoot\System32\cmd.exe" -ArgumentList "/c", "echo vssadmin delete shadows /all /quiet & ping -n 20 127.0.0.1 > nul" -WindowStyle Hidden
+    Wait-Until { Events | Where-Object { $_.title -eq "Blocked an attempt to delete backups" } } "Process Guard blocked a shadow-copy deletion command" 15
+
+    # --- Ransomware rollback: snapshot, "encrypt" + delete, preview, restore --------
+    $rb = Join-Path $env:USERPROFILE "Documents\vigil-rollback-test"
+    New-Item -ItemType Directory -Force $rb | Out-Null
+    $report = Join-Path $rb "report.txt"; $gone = Join-Path $rb "gone.txt"
+    Set-Content $report ("quarterly figures " * 2000) -Encoding ascii
+    Set-Content $gone "keep me" -Encoding ascii
+    Start-Sleep 2
+    Req @{ type = "create_snapshot" } | Out-Null
+    $snap = (Req @{ type = "list_snapshots" }) | Where-Object { $_.ours } | Select-Object -First 1
+    if (-not $snap) { throw "FAIL: no rollback snapshot listed after create_snapshot" }
+    Write-Host "PASS: rollback snapshot taken ($($snap.id), $($snap.volume))" -ForegroundColor Green
+    $bytes = New-Object byte[] 65536; [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+    [IO.File]::WriteAllBytes($report, $bytes)
+    Remove-Item $gone
+    $preview = Req @{ type = "rollback_preview"; data = @{ snapshot_id = $snap.id; folders = @($rb) } }
+    $preview.changes | Format-Table change, looks_encrypted, path -AutoSize | Out-Host
+    if (-not ($preview.changes | Where-Object { $_.path -eq $report -and $_.looks_encrypted })) { throw "FAIL: encrypted file not flagged in the rollback preview" }
+    if (-not ($preview.changes | Where-Object { $_.path -eq $gone -and $_.change -eq "deleted" })) { throw "FAIL: deleted file missing from the rollback preview" }
+    Write-Host "PASS: rollback preview found the encrypted and the deleted file" -ForegroundColor Green
+    Invoke-Elevated @{ type = "rollback_restore"; data = @{ snapshot_id = $snap.id; paths = @($report, $gone) } }
+    if ((Get-Content $report -Raw) -notlike "quarterly figures*") { throw "FAIL: report.txt not restored" }
+    if ((Get-Content $gone -Raw).Trim() -ne "keep me") { throw "FAIL: deleted file not restored" }
+    $backup = Get-ChildItem (Join-Path $env:USERPROFILE "Vigil Restore Backup") -Recurse -Filter report.txt | Select-Object -First 1
+    if (-not $backup -or (Get-Item $backup.FullName).Length -ne 65536) { throw "FAIL: the encrypted copy was not kept in the backup folder" }
+    Write-Host "PASS: rollback restored both files and kept the replaced copy" -ForegroundColor Green
+    Remove-Item $rb, (Join-Path $env:USERPROFILE "Vigil Restore Backup") -Recurse -Force
+
+    # --- Privacy Monitor: camera use recorded by Windows -> notified ------------------
+    $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $cam = "Registry::HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\webcam\NonPackaged\C:#sentinel-smoke#fake-cam.exe"
+    New-Item $cam -Force | Out-Null
+    New-ItemProperty $cam -Name LastUsedTimeStart -PropertyType QWord -Value ([DateTime]::UtcNow.ToFileTimeUtc()) -Force | Out-Null
+    New-ItemProperty $cam -Name LastUsedTimeStop -PropertyType QWord -Value 0 -Force | Out-Null
+    Wait-Until { Events | Where-Object { $_.kind -eq "device_access" -and $_.title -eq "Camera turned on by fake-cam.exe" } } "Privacy Monitor reported the camera turning on" 20
+    Wait-Until { (Status).devices_in_use | Where-Object { $_.app -eq "fake-cam.exe" } } "dashboard status shows the camera in use"
+    New-ItemProperty $cam -Name LastUsedTimeStop -PropertyType QWord -Value ([DateTime]::UtcNow.ToFileTimeUtc()) -Force | Out-Null
+    Wait-Until { Events | Where-Object { $_.title -eq "Camera turned off by fake-cam.exe" } } "Privacy Monitor reported the camera turning off" 20
+    Remove-Item $cam -Force
 
     # --- Network Guard: WFP refuses the connection immediately ----------------------
     Wait-Until { (Status).network_blocked_ranges -ge 1 } "Network Guard installed WFP filters"

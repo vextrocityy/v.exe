@@ -1,4 +1,4 @@
-//! Blocking IPC client for the Sentinel-Lite service.
+//! Blocking IPC client for the Vigil service.
 //! One short-lived connection per request keeps the UI stateless; the
 //! subscription stream uses its own long-lived connection.
 
@@ -67,9 +67,9 @@ fn open_transport() -> std::io::Result<Box<dyn Conn>> {
 /// Connect and authenticate.
 pub fn connect() -> Result<Box<dyn Conn>, ClientError> {
     let token = std::fs::read_to_string(paths::token_file())
-        .map_err(|_| ClientError::msg("The Sentinel-Lite protection service is not running."))?;
+        .map_err(|_| ClientError::msg("The Vigil protection service is not running."))?;
     let mut conn =
-        open_transport().map_err(|e| ClientError::msg(format!("Cannot reach the Sentinel-Lite service: {e}")))?;
+        open_transport().map_err(|e| ClientError::msg(format!("Cannot reach the Vigil service: {e}")))?;
     write_frame(
         &mut conn,
         &Request::Auth {
@@ -80,7 +80,7 @@ pub fn connect() -> Result<Box<dyn Conn>, ClientError> {
     match read_frame::<_, Response>(&mut conn)? {
         Response::AuthOk { protocol_version } if protocol_version == PROTOCOL_VERSION => Ok(conn),
         Response::AuthOk { protocol_version } => Err(ClientError::msg(format!(
-            "This dashboard (protocol v{PROTOCOL_VERSION}) does not match the installed service (v{protocol_version}). Reinstall Sentinel-Lite."
+            "This dashboard (protocol v{PROTOCOL_VERSION}) does not match the installed service (v{protocol_version}). Reinstall Vigil."
         ))),
         Response::Error { code, message } => Err(ClientError { code: Some(code), message }),
         other => Err(ClientError::msg(format!("unexpected handshake reply: {other:?}"))),

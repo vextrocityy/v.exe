@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Sentinel-Lite",
+  "productName": "Vigil",
   "version": "0.1.0",
   "identifier": "com.sentinel-lite.dashboard",
   "build": {
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Sentinel-Lite",
+        "title": "Vigil",
         "width": 1200,
         "height": 780,
         "minWidth": 980,
@@ -37,7 +37,7 @@
       "icons/128x128@2x.png",
       "icons/icon.ico"
     ],
-    "publisher": "Sentinel-Lite",
+    "publisher": "Vigil",
     "shortDescription": "Lightweight endpoint protection for Windows",
     "windows": {
       "nsis": {
@@ -45,5 +45,5 @@
       }
     }
   },
-  "mainBinaryName": "sentinel-lite"
+  "mainBinaryName": "vigil"
 }

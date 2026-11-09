@@ -62,7 +62,7 @@ fn key(p: &Path) -> String {
 /// data and cannot be compressed away).
 fn content() -> Vec<u8> {
     let mut data =
-        b"This hidden file is a Sentinel-Lite ransomware decoy. Please do not edit, move or delete it.\n".to_vec();
+        b"This hidden file is a Vigil ransomware decoy. Please do not edit, move or delete it.\n".to_vec();
     let mut noise = vec![0u8; 48 * 1024];
     let _ = getrandom::fill(&mut noise);
     data.extend_from_slice(&noise);

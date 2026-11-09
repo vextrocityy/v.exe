@@ -514,18 +514,21 @@ mod imp {
     }
 }
 
-/// Is the dashboard (`sentinel-lite.exe`) running in any session?
+/// Is the dashboard (`vigil.exe`; `sentinel-lite.exe` before the rename) running in any session?
 pub fn dashboard_running() -> bool {
     list_processes()
         .into_iter()
         .filter_map(|p| image_path(p.pid))
         .any(|img| {
             img.file_name()
-                .is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case("sentinel-lite.exe"))
+                .is_some_and(|n| {
+                    let n = n.to_string_lossy();
+                    n.eq_ignore_ascii_case("vigil.exe") || n.eq_ignore_ascii_case("sentinel-lite.exe")
+                })
         })
 }
 
-/// Is `client` a trusted Sentinel-Lite component? When the service runs from a
+/// Is `client` a trusted Vigil component? When the service runs from a
 /// protected install location (Program Files, writable only by administrators),
 /// clients must be executables from that same directory. Dev builds running from
 /// anywhere else skip the check (and log that they do).
