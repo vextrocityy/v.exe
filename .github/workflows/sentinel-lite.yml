@@ -67,12 +67,16 @@ jobs:
         run: cargo clippy --locked -p sentinel-ui -- -D warnings
       - name: Upgrade from Sentinel-Lite (pre-rename) build 18
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           # The last release before the rename; real installs (and their self-updater) start here.
           $old = Join-Path $env:TEMP "Sentinel-Lite_0.1.0_x64-setup.exe"
-          $url = "https://github.com/vextrocityy/v.exe/releases/download/sentinel-lite-build-18/Sentinel-Lite_0.1.0_x64-setup.exe"
-          foreach ($try in 1..6) {   # GitHub release downloads sometimes answer 502/504 for a while
-            try { Invoke-WebRequest $url -OutFile $old; break }
+          # Via the API asset endpoint: the github.com/.../releases/download/ path has had 504 outages.
+          $url = "https://api.github.com/repos/vextrocityy/v.exe/releases/assets/726112307"
+          $headers = @{ Accept = "application/octet-stream"; Authorization = "Bearer $env:GH_TOKEN" }
+          foreach ($try in 1..6) {
+            try { Invoke-WebRequest $url -Headers $headers -OutFile $old; break }
             catch { if ($try -eq 6) { throw }; Write-Host "download failed ($($_.Exception.Message)), retrying"; Start-Sleep (10 * $try) }
           }
           Start-Process $old -ArgumentList "/S" -Wait

@@ -182,11 +182,15 @@ fn agent(url: &str) -> ureq::Agent {
 /// GitHub's release downloads (and other CDNs) answer 502/503/504 now and then
 /// for a few seconds. Retry those and connection failures a few times with a
 /// growing pause; anything else (404, 403, TLS errors) fails at once.
-fn get_with_retry(url: &str) -> Result<ureq::Response> {
+fn get_with_retry(url: &str, accept: Option<&str>) -> Result<ureq::Response> {
     let pauses: &[u64] = if cfg!(test) { &[0, 0] } else { &[2, 6, 15] };
     let mut attempt = 0;
     loop {
-        match agent(url).get(url).call() {
+        let mut req = agent(url).get(url);
+        if let Some(a) = accept {
+            req = req.set("Accept", a);
+        }
+        match req.call() {
             Ok(resp) => return Ok(resp),
             Err(e) => {
                 let transient = match &e {
@@ -210,11 +214,68 @@ fn get_with_retry(url: &str) -> Result<ureq::Response> {
 }
 
 pub fn fetch(url: &str) -> Result<Vec<u8>> {
+    match fetch_with(url, None) {
+        Ok(b) => Ok(b),
+        Err(e) => match github_api_asset(url) {
+            // github.com/<o>/<r>/releases/.../download/<file> can be down (504) while the
+            // same file is served fine through the API: try that before giving up.
+            Some(api) => {
+                tracing::info!(url, "release download failed; trying the GitHub API asset endpoint");
+                fetch_release_asset_via_api(&api.0, &api.1).map_err(|api_err| e.context(format!("API fallback: {api_err:#}")))
+            }
+            None => Err(e),
+        },
+    }
+}
+
+/// For a GitHub release download URL, the API release lookup and the asset name:
+/// `https://github.com/o/r/releases/download/<tag>/<name>` → (`…/repos/o/r/releases/tags/<tag>`, name);
+/// `https://github.com/o/r/releases/latest/download/<name>` → (`…/repos/o/r/releases/latest`, name).
+pub fn github_api_asset(url: &str) -> Option<(String, String)> {
+    let rest = url.strip_prefix("https://github.com/")?;
+    let parts: Vec<&str> = rest.split('/').collect();
+    let ok = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b));
+    match parts.as_slice() {
+        [o, r, "releases", "latest", "download", name] if ok(o) && ok(r) && ok(name) => {
+            Some((format!("https://api.github.com/repos/{o}/{r}/releases/latest"), name.to_string()))
+        }
+        [o, r, "releases", "download", tag, name] if ok(o) && ok(r) && ok(tag) && ok(name) => {
+            Some((format!("https://api.github.com/repos/{o}/{r}/releases/tags/{tag}"), name.to_string()))
+        }
+        _ => None,
+    }
+}
+
+fn fetch_release_asset_via_api(release_api: &str, name: &str) -> Result<Vec<u8>> {
+    #[derive(serde::Deserialize)]
+    struct Asset {
+        name: String,
+        url: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct Rel {
+        assets: Vec<Asset>,
+    }
+    let rel: Rel = serde_json::from_slice(&fetch_with(release_api, None)?).context("unexpected release JSON")?;
+    let asset = rel
+        .assets
+        .into_iter()
+        .find(|a| a.name == name)
+        .with_context(|| format!("release has no asset {name}"))?;
+    anyhow::ensure!(
+        asset.url.starts_with("https://api.github.com/repos/"),
+        "unexpected asset URL {}",
+        asset.url
+    );
+    fetch_with(&asset.url, Some("application/octet-stream"))
+}
+
+fn fetch_with(url: &str, accept: Option<&str>) -> Result<Vec<u8>> {
     anyhow::ensure!(
         crate::settings::is_allowed_update_url(url),
         "refusing non-HTTPS update URL"
     );
-    let resp = get_with_retry(url)?;
+    let resp = get_with_retry(url, accept)?;
     let mut buf = Vec::new();
     resp.into_reader().take(MAX_DOWNLOAD_BYTES + 1).read_to_end(&mut buf)?;
     anyhow::ensure!(
@@ -359,6 +420,26 @@ mod tests {
             }
         });
         format!("http://127.0.0.1:{}/file", addr.port())
+    }
+
+    #[test]
+    fn release_downloads_map_to_the_api() {
+        assert_eq!(
+            github_api_asset("https://github.com/vextrocityy/v.exe/releases/download/sentinel-lite-build-18/Vigil_0.1.0_x64-setup.exe"),
+            Some((
+                "https://api.github.com/repos/vextrocityy/v.exe/releases/tags/sentinel-lite-build-18".into(),
+                "Vigil_0.1.0_x64-setup.exe".into()
+            ))
+        );
+        assert_eq!(
+            github_api_asset("https://github.com/YARAHQ/yara-forge/releases/latest/download/yara-forge-rules-core.zip"),
+            Some((
+                "https://api.github.com/repos/YARAHQ/yara-forge/releases/latest".into(),
+                "yara-forge-rules-core.zip".into()
+            ))
+        );
+        assert_eq!(github_api_asset("https://www.spamhaus.org/drop/drop_v4.json"), None);
+        assert_eq!(github_api_asset("https://github.com/o/r/releases/download/t/../../x"), None);
     }
 
     #[test]
