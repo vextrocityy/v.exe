@@ -184,6 +184,21 @@ pub fn uninstall() -> Result<()> {
                 break;
             }
         }
+        // A service that does not stop would stay registered ("marked for deletion")
+        // until its process exits. Never let a hang block uninstalling: end it.
+        let st = service.query_status()?;
+        if st.current_state != ServiceState::Stopped {
+            if let Some(pid) = st.process_id {
+                eprintln!("{SERVICE_NAME} did not stop within 10 s; ending process {pid}");
+                crate::platform::terminate(pid);
+                for _ in 0..20 {
+                    std::thread::sleep(Duration::from_millis(250));
+                    if service.query_status()?.current_state == ServiceState::Stopped {
+                        break;
+                    }
+                }
+            }
+        }
     }
     service.delete()?;
     println!("Removed {SERVICE_NAME}.");

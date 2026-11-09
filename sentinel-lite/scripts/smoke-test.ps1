@@ -123,8 +123,14 @@ try {
     $fs = [IO.File]::Open($decoy, "Open", "Write"); $fs.SetLength(0)
     $junk = [Text.Encoding]::ASCII.GetBytes("ENCRYPTED " * 100); $fs.Write($junk, 0, $junk.Length); $fs.Close()
     Wait-Until { Events | Where-Object { $_.kind -eq "process_suspended" -and $_.pid -eq $load.Id } } "decoy change suspended the heavy writer (pid $($load.Id))" 30
-    $thread = (Get-Process -Id $load.Id).Threads | Select-Object -First 1
-    if ($thread.WaitReason -ne "Suspended") { throw "FAIL: writer not actually suspended (wait reason: $($thread.WaitReason))" }
+    # A thread still taking the suspend APC briefly reports "Executive"; give it a moment.
+    $reasons = $null
+    for ($i = 0; $i -lt 25; $i++) {
+        $reasons = @((Get-Process -Id $load.Id).Threads | ForEach-Object { "$($_.WaitReason)" })
+        if (-not ($reasons | Where-Object { $_ -ne "Suspended" })) { break }
+        Start-Sleep -Milliseconds 200
+    }
+    if ($reasons | Where-Object { $_ -ne "Suspended" }) { throw "FAIL: writer not actually suspended (wait reasons: $($reasons -join ', '))" }
     Invoke-Elevated @{ type = "process_action"; data = @{ pid = $load.Id; action = "terminate" } }
     Wait-Until { $load.HasExited } "Terminate ended the suspended process" 15
     Wait-Until { Quarantine | Where-Object { $_.threat_name -eq "Behavior.Ransomware.Decoy" } } "its executable was quarantined"

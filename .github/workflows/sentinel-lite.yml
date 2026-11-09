@@ -146,7 +146,14 @@ jobs:
           # The NSIS uninstaller relaunches itself from %TEMP%, so -Wait returns early: poll.
           $deadline = (Get-Date).AddSeconds(60)
           while ((Get-Date) -lt $deadline -and (Get-Service SentinelLite -ErrorAction SilentlyContinue)) { Start-Sleep 2 }
-          if (Get-Service SentinelLite -ErrorAction SilentlyContinue) { throw "service still registered 60 s after uninstall" }
+          if (Get-Service SentinelLite -ErrorAction SilentlyContinue) {
+            "--- diagnostics ---"
+            sc.exe queryex SentinelLite | Out-Host
+            Get-Process sentinel*, Sentinel-Lite*, uninstall*, Un_A* -ErrorAction SilentlyContinue | Format-Table Id, ProcessName, StartTime, Path -AutoSize | Out-Host
+            "install dir:"; Get-ChildItem $dir -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name | Out-Host
+            Get-ChildItem "$env:ProgramData\SentinelLite\logs" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime | Select-Object -Last 1 | ForEach-Object { Get-Content $_.FullName -Tail 40 } | Out-Host
+            throw "service still registered 60 s after uninstall"
+          }
           "Install / verify / uninstall OK"
           exit 0   # the refused-client check above leaves a non-zero $LASTEXITCODE by design
       - uses: actions/upload-artifact@v4
