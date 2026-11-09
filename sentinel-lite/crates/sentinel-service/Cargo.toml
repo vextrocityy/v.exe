@@ -20,7 +20,12 @@ sha2 = "0.10"
 rusqlite = { version = "0.32", features = ["bundled"] }
 notify = { version = "8", default-features = false }
 getrandom = "0.3"
-ureq = { version = "2.12", default-features = false, features = ["tls", "native-certs", "gzip"] }
+ureq = { version = "2.12", default-features = false, features = ["tls", "gzip"] }
+# Certificate checks are delegated to the OS (Windows CryptoAPI): it fetches missing roots on
+# demand, checks revocation and honours roots installed by security software or IT.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-platform-verifier = "0.7"
+webpki-roots = "1"
 ed25519-dalek = "2"
 yara-x = { version = "1.23", default-features = false, features = ["pe-module", "dotnet-module", "hash-module", "math-module", "string-module", "time-module", "lnk-module", "elf-module", "macho-module", "constant-folding", "exact-atoms", "fast-regexp"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }

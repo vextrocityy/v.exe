@@ -20,6 +20,7 @@ use anyhow::{bail, Context, Result};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use sentinel_protocol::{Settings, Severity};
 use std::io::Read;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 /// `{key}` is replaced by the abuse.ch Auth-Key. abuse.ch refreshes this export
@@ -136,8 +137,40 @@ fn is_loopback(url: &str) -> bool {
     host == "127.0.0.1" || host.eq_ignore_ascii_case("localhost")
 }
 
+/// TLS settings for every download. Certificates are checked by the operating
+/// system (Windows CryptoAPI): unlike reading the root store directly, Windows
+/// fetches missing root certificates on demand (the store on a normal PC is
+/// only partly populated), checks revocation, and trusts roots installed by
+/// security software or IT. Falls back to Mozilla's root list if the platform
+/// verifier cannot start.
+fn tls_config() -> Arc<rustls::ClientConfig> {
+    static CONFIG: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
+    CONFIG
+        .get_or_init(|| {
+            let provider = Arc::new(rustls::crypto::ring::default_provider());
+            let builder = || {
+                rustls::ClientConfig::builder_with_provider(provider.clone())
+                    .with_safe_default_protocol_versions()
+                    .expect("ring supports the default TLS versions")
+            };
+            let config = match rustls_platform_verifier::Verifier::new(provider.clone()) {
+                Ok(verifier) => {
+                    builder().dangerous().with_custom_certificate_verifier(Arc::new(verifier)).with_no_client_auth()
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "OS certificate verifier unavailable; using bundled Mozilla roots");
+                    let roots = rustls::RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() };
+                    builder().with_root_certificates(roots).with_no_client_auth()
+                }
+            };
+            Arc::new(config)
+        })
+        .clone()
+}
+
 fn agent(url: &str) -> ureq::Agent {
     ureq::AgentBuilder::new()
+        .tls_config(tls_config())
         .timeout_connect(Duration::from_secs(15))
         .timeout(Duration::from_secs(180))
         .user_agent(concat!("Sentinel-Lite/", env!("CARGO_PKG_VERSION")))
