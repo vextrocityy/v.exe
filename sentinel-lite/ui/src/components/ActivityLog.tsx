@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Activity, AlertOctagon, Ban, Bug, Camera, DownloadCloud, FileWarning, History, Info, KeyRound, Lock, Mic, PauseCircle, Play, ScanLine, Settings2, Skull } from "lucide-react";
+import { Activity, AlertOctagon, Ban, Bug, Camera, Check, Copy, DownloadCloud, FileWarning, FolderOpen, History, Info, KeyRound, Lock, Mic, PauseCircle, Play, ScanLine, Settings2, Skull } from "lucide-react";
 import { api } from "../lib/api";
 import type { EventKind, SecurityEvent, Severity } from "../lib/types";
 import { shortPath, timeAgo } from "../lib/format";
@@ -48,11 +48,12 @@ export function ActivityLog({ events, limit, compact }: { events: SecurityEvent[
                 <p className="truncate text-sm text-slate-200">{e.title}</p>
                 <time className="shrink-0 text-xs text-slate-500">{timeAgo(e.timestamp)}</time>
               </div>
-              {e.path && <p className="truncate font-mono text-xs text-slate-500" title={e.path}>{shortPath(e.path, compact ? 56 : 96)}</p>}
+              {e.path && (compact ? <p className="truncate font-mono text-xs text-slate-500" title={e.path}>{shortPath(e.path, 56)}</p> : <PathLine path={e.path} />)}
               {!compact && e.detail && <p className="mt-0.5 text-xs text-slate-400">{e.detail}</p>}
               {e.kind === "process_suspended" && e.pid != null && <SuspendedActions pid={e.pid} />}
               {e.kind === "process_blocked" && e.title.startsWith("Blocked unsigned program") && e.path && <AllowButton path={e.path} />}
               {!compact && e.kind === "persistence_change" && /^(New scheduled task|Scheduled task changed)/.test(e.title) && e.path && <DisableTaskButton name={e.path} />}
+              {!compact && e.kind === "threat_detected" && e.title.endsWith("suspicious file left in place") && e.path && <QuarantineButton path={e.path} threat={e.title.replace(/: suspicious file left in place$/, "")} />}
             </div>
           </li>
         );
@@ -137,6 +138,86 @@ function DisableTaskButton({ name }: { name: string }) {
     <div className="mt-2 flex items-center gap-2">
       <button disabled={state === "busy"} onClick={disable} title="Requires administrator approval" className="rounded-md border border-slate-700 px-2.5 py-1 text-xs text-slate-300 hover:border-rose-400/50 hover:text-rose-300 disabled:opacity-50">
         Disable this task
+      </button>
+      {err && <span className="text-xs text-rose-400">{err}</span>}
+    </div>
+  );
+}
+
+/** A real file path (drive or UNC), as opposed to a scheduled-task name. */
+function isFilePath(p: string): boolean {
+  return /^[A-Za-z]:[\\/]|^\\\\/.test(p);
+}
+
+async function copyText(text: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const t = document.createElement("textarea");
+    t.value = text;
+    document.body.appendChild(t);
+    t.select();
+    document.execCommand("copy");
+    t.remove();
+  }
+}
+
+/** Full path, selectable, with Copy and Show in folder. */
+export function PathLine({ path }: { path: string }) {
+  const [copied, setCopied] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const file = isFilePath(path);
+  const copy = async () => {
+    await copyText(path);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+  const reveal = async () => {
+    setErr(null);
+    try {
+      await api.revealPath(path);
+    } catch (e) {
+      setErr(String(e));
+    }
+  };
+  return (
+    <div className="group flex items-start gap-2">
+      <p className="min-w-0 select-text break-all font-mono text-xs text-slate-500">{path}</p>
+      <div className="flex shrink-0 items-center gap-0.5 opacity-60 transition group-hover:opacity-100">
+        <button onClick={copy} title="Copy path" aria-label="Copy path" className="rounded p-1 text-slate-400 hover:bg-slate-800 hover:text-cyan-300">
+          {copied ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
+        </button>
+        {file && (
+          <button onClick={reveal} title="Show in folder" aria-label="Show in folder" className="rounded p-1 text-slate-400 hover:bg-slate-800 hover:text-cyan-300">
+            <FolderOpen className="h-3.5 w-3.5" />
+          </button>
+        )}
+      </div>
+      {err && <span className="text-xs text-rose-400">{err}</span>}
+    </div>
+  );
+}
+
+/** A low-confidence match left in place: quarantine it after review. */
+function QuarantineButton({ path, threat }: { path: string; threat: string }) {
+  const [state, setState] = useState<"idle" | "busy" | "done">("idle");
+  const [err, setErr] = useState<string | null>(null);
+  const go = async () => {
+    setState("busy");
+    setErr(null);
+    try {
+      await api.quarantinePath(path, threat);
+      setState("done");
+    } catch (e) {
+      setState("idle");
+      setErr(String(e));
+    }
+  };
+  if (state === "done") return <p className="mt-2 text-xs text-emerald-400">Moved to quarantine. You can restore it from Quarantine.</p>;
+  return (
+    <div className="mt-2 flex items-center gap-2">
+      <button disabled={state === "busy"} onClick={go} title="Requires administrator approval" className="flex items-center gap-1 rounded-md border border-slate-700 px-2.5 py-1 text-xs text-slate-300 hover:border-rose-400/50 hover:text-rose-300 disabled:opacity-50">
+        <Lock className="h-3.5 w-3.5" /> Quarantine it
       </button>
       {err && <span className="text-xs text-rose-400">{err}</span>}
     </div>

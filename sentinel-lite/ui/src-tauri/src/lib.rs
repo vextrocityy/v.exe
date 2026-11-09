@@ -152,6 +152,27 @@ fn open_virustotal(app: AppHandle, sha256: String) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// Open File Explorer at a file, selected. If it no longer exists (quarantined,
+/// deleted), open the closest folder that does.
+#[tauri::command]
+fn reveal_path(app: AppHandle, path: String) -> Result<(), String> {
+    let p = std::path::PathBuf::from(&path);
+    if !p.is_absolute() {
+        return Err("not a file path".into());
+    }
+    if p.exists() {
+        return app.opener().reveal_item_in_dir(&p).map_err(|e| e.to_string());
+    }
+    let dir = p
+        .ancestors()
+        .skip(1)
+        .find(|d| d.is_dir())
+        .ok_or("the file and its folder no longer exist")?;
+    app.opener()
+        .open_path(dir.to_string_lossy(), None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn disable_task(name: String) -> Result<(), String> {
     call_privileged(Request::DisableTask { name }).await.map(|_| ())
@@ -403,6 +424,7 @@ pub fn run() {
             quarantine_path,
             pick_files,
             open_virustotal,
+            reveal_path,
             enable_hardening,
             disable_task,
             get_device_usage,

@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 import { RotateCcw, ShieldCheck, Trash2 } from "lucide-react";
 import { Panel } from "../components/Panel";
+import { PathLine } from "../components/ActivityLog";
 import { api } from "../lib/api";
-import { formatBytes, shortPath, timeAgo } from "../lib/format";
+import { formatBytes, timeAgo } from "../lib/format";
 import type { QuarantineItem } from "../lib/types";
 
 export function QuarantinePage({ onChanged }: { onChanged: () => void }) {
@@ -54,7 +55,7 @@ export function QuarantinePage({ onChanged }: { onChanged: () => void }) {
                     <p className="font-medium text-rose-300">{q.threat_name}</p>
                     <p className="font-mono text-[11px] text-slate-500" title={q.sha256}>{q.sha256.slice(0, 16)}…</p>
                   </td>
-                  <td className="max-w-0 py-3 pr-4"><p className="truncate font-mono text-xs text-slate-400" title={q.original_path}>{shortPath(q.original_path, 70)}</p></td>
+                  <td className="py-3 pr-4"><PathLine path={q.original_path} /></td>
                   <td className="py-3 text-slate-400">{formatBytes(q.size)}</td>
                   <td className="py-3 text-slate-400">{timeAgo(q.quarantined_at)}</td>
                   <td className="px-5 py-3">
