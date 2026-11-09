@@ -143,8 +143,10 @@ jobs:
           #  still build $build: the mechanism, not a version change, is what is verified here.)
 
           Start-Process "$dir\uninstall.exe" -ArgumentList "/S" -Wait
-          Start-Sleep 10
-          if (Get-Service SentinelLite -ErrorAction SilentlyContinue) { throw "service still registered after uninstall" }
+          # The NSIS uninstaller relaunches itself from %TEMP%, so -Wait returns early: poll.
+          $deadline = (Get-Date).AddSeconds(60)
+          while ((Get-Date) -lt $deadline -and (Get-Service SentinelLite -ErrorAction SilentlyContinue)) { Start-Sleep 2 }
+          if (Get-Service SentinelLite -ErrorAction SilentlyContinue) { throw "service still registered 60 s after uninstall" }
           "Install / verify / uninstall OK"
           exit 0   # the refused-client check above leaves a non-zero $LASTEXITCODE by design
       - uses: actions/upload-artifact@v4

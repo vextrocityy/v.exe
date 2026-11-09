@@ -1161,7 +1161,18 @@ impl Engine {
     pub fn shutdown(&self) {
         if let Some((stop, handle)) = lock(&self.scheduler).take() {
             stop.store(true, Ordering::Relaxed);
-            let _ = handle.join();
+            // The scheduler may be mid-way through a download or rule compile. Give it a
+            // moment, but never let it hold up a service stop / uninstall: the update path
+            // is atomic (temp file + rename, SQLite transactions), so abandoning it is safe.
+            let deadline = Instant::now() + std::time::Duration::from_secs(3);
+            while !handle.is_finished() && Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            if handle.is_finished() {
+                let _ = handle.join();
+            } else {
+                tracing::warn!("scheduler busy at shutdown; not waiting for it");
+            }
         }
         self.cancel_scan();
         self.stop_realtime();
