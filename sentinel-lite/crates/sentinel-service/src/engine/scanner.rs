@@ -125,8 +125,8 @@ fn walk(engine: &Engine, roots: &[PathBuf], tx: &SyncSender<PathBuf>, cancel: &A
                 continue;
             }
             let path = entry.path();
-            if engine.is_excluded(&path) {
-                continue;
+            if engine.is_excluded(&path) || engine.is_decoy(&path) {
+                continue; // our own ransomware decoys are random data: never scan them
             }
             match entry.file_type() {
                 Ok(ft) if ft.is_dir() => stack.push(path),

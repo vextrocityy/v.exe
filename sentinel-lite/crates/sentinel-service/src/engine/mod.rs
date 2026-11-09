@@ -413,6 +413,12 @@ impl Engine {
     /// React to a signature match: record it and quarantine if configured.
     pub fn handle_detection(&self, path: &Path, verdict: &FileVerdict, pid: Option<u32>, source: &str) {
         let Some(hit) = &verdict.hit else { return };
+        if self.is_decoy(path) {
+            // Decoys are random bytes behind a document/image name; a rule matching
+            // that noise must never quarantine them (that would read as an attack later).
+            tracing::info!(path = %path.display(), rule = %hit.name, "ignored a match on our own ransomware decoy");
+            return;
+        }
         if let Err(reason) = self.may_remediate(path, hit) {
             self.unresolved_threats.fetch_add(1, Ordering::Relaxed);
             self.emit(
@@ -912,11 +918,21 @@ impl Engine {
         let mut decoys = lock(&self.decoys);
         if s.realtime_protection && s.file_monitor && s.ransomware_decoys {
             for (path, state) in decoys.tampered() {
+                let what = match (state, std::fs::read(&path)) {
+                    (realtime::decoy::State::Modified, _) => "was modified".to_string(),
+                    (_, Err(e)) if e.kind() == std::io::ErrorKind::NotFound => "was deleted or moved".to_string(),
+                    (_, Err(e)) => format!("could not be read ({e}): another program may have it open or blocked"),
+                    (_, Ok(_)) => "was briefly unreadable".to_string(),
+                };
                 self.emit(
                     EventKind::BehaviorAlert,
                     Severity::High,
                     "Ransomware decoy changed while protection was off",
-                    Some(format!("The decoy was {state:?}. Check recent files in this folder.").to_lowercase()),
+                    Some(format!(
+                        "This hidden decoy {what} while Vigil was not running. A fresh decoy has been put back. \
+                         If several of your own files in this folder also changed, open Recovery and compare \
+                         them with the latest snapshot."
+                    )),
                     Some(&path),
                     None,
                 );
@@ -1769,6 +1785,23 @@ rule Low_Confidence  { meta: score = 60 strings: $a = "LOW-CONFIDENCE-MARKER" co
             "{titles:?}"
         );
         assert!(suspended, "{titles:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scans_never_quarantine_our_own_decoys() {
+        let (dir, engine) = engine_with_rules(RULES);
+        let profile = dir.path().join("home").join("bob");
+        std::fs::create_dir_all(profile.join("Documents")).unwrap();
+        assert_eq!(engine.plant_decoys_for_test(std::slice::from_ref(&profile)), 2);
+        let decoy = profile.join("Documents").join("!_Accounts_2026.xlsx");
+        // Pretend a rule matches the decoy's bytes.
+        add_sig(&engine, &std::fs::read(&decoy).unwrap(), "Trojan.FalsePositive");
+        let v = engine.check_file(&decoy, None).unwrap();
+        assert!(v.hit.is_some());
+        engine.handle_detection(&decoy, &v, None, "on-demand scan");
+        assert!(decoy.exists(), "decoy was quarantined");
+        assert_eq!(engine.db.list_quarantine().unwrap().len(), 0);
     }
 
     #[cfg(unix)]
