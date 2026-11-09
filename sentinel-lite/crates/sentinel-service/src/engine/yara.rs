@@ -44,6 +44,82 @@ pub struct CompileReport {
     pub errors: Vec<String>,
 }
 
+// ---------------------------------------------------------------------------
+// Encoded rule files
+// ---------------------------------------------------------------------------
+//
+// YARA rules are made of byte patterns taken from real malware, so antivirus
+// products (Microsoft Defender included) flag rule files and compiled rule sets
+// as malware and block reading them (Windows error 225, "file contains a
+// virus"). Rule files we write are therefore stored lightly encoded, like the
+// quarantine vault: no plaintext malware pattern ever sits on disk. This is
+// not encryption, only enough to keep signature scanners from matching.
+
+const ENCODED_MAGIC: &[u8] = b"VIGIL-ENCODED-1\n";
+/// Extension of an encoded rule source (`.yarx`).
+pub const ENCODED_EXT: &str = "yarx";
+
+fn keystream(i: usize) -> u8 {
+    const KEY: &[u8; 16] = b"\x5a\xc3\x17\x9e\x2b\x71\xd4\x08\xe6\x3f\x91\x4c\xb8\x25\x6d\xfa";
+    KEY[i % 16] ^ (i as u8).wrapping_mul(31) ^ ((i >> 8) as u8)
+}
+
+pub fn encode(plain: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(ENCODED_MAGIC.len() + plain.len());
+    out.extend_from_slice(ENCODED_MAGIC);
+    out.extend(plain.iter().enumerate().map(|(i, b)| b ^ keystream(i)));
+    out
+}
+
+/// Decode an encoded file; anything else (a plain `.yar`) is returned as is.
+pub fn decode(bytes: Vec<u8>) -> Vec<u8> {
+    match bytes.strip_prefix(ENCODED_MAGIC) {
+        Some(body) => body.iter().enumerate().map(|(i, b)| b ^ keystream(i)).collect(),
+        None => bytes,
+    }
+}
+
+/// Read a rule source or compiled set, plain or encoded.
+pub fn read_rules_file(path: &Path) -> std::io::Result<Vec<u8>> {
+    std::fs::read(path).map(decode)
+}
+
+/// Write `plain` encoded, atomically.
+pub fn write_encoded(path: &Path, plain: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, encode(plain))?;
+    std::fs::rename(&tmp, path)
+}
+
+/// Re-store plain feed rule files (written by older versions) encoded.
+/// Returns true if one could not be read (antivirus blocked or removed it),
+/// so the caller can fetch the feed again.
+pub fn migrate_plain_feeds(dir: &Path) -> bool {
+    let mut lost = false;
+    let Ok(entries) = std::fs::read_dir(dir) else { return false };
+    for e in entries.flatten() {
+        let p = e.path();
+        let ext = p.extension().and_then(|x| x.to_str()).map(|x| x.to_ascii_lowercase());
+        if !matches!(ext.as_deref(), Some("yar" | "yara")) {
+            continue;
+        }
+        match std::fs::read(&p) {
+            Ok(plain) if !plain.starts_with(ENCODED_MAGIC) => {
+                if write_encoded(&p.with_extension(ENCODED_EXT), &plain).is_ok() {
+                    let _ = std::fs::remove_file(&p);
+                }
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(file = %p.display(), error = %e, "plain rule file unreadable (antivirus?); removing it");
+                let _ = std::fs::remove_file(&p);
+                lost = true;
+            }
+        }
+    }
+    lost
+}
+
 fn rule_files(dirs: &[PathBuf]) -> Vec<PathBuf> {
     let mut files = Vec::new();
     for dir in dirs {
@@ -51,7 +127,7 @@ fn rule_files(dirs: &[PathBuf]) -> Vec<PathBuf> {
         for e in entries.flatten() {
             let p = e.path();
             let ext = p.extension().and_then(|x| x.to_str()).map(|x| x.to_ascii_lowercase());
-            if p.is_file() && matches!(ext.as_deref(), Some("yar" | "yara")) {
+            if p.is_file() && matches!(ext.as_deref(), Some("yar" | "yara" | ENCODED_EXT)) {
                 files.push(p);
             }
         }
@@ -68,8 +144,9 @@ pub fn fingerprint(dirs: &[PathBuf]) -> String {
     let mut parts: Vec<(String, Vec<u8>)> = rule_files(dirs)
         .into_iter()
         .map(|p| {
-            let name = p.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
-            let digest = std::fs::read(&p).map(|src| Sha256::digest(&src).to_vec()).unwrap_or_default();
+            // Stem, like the namespace: re-storing feed.yar as feed.yarx changes nothing.
+            let name = namespace_for(&p).to_lowercase();
+            let digest = read_rules_file(&p).map(|src| Sha256::digest(&src).to_vec()).unwrap_or_default();
             (name, digest)
         })
         .collect();
@@ -124,7 +201,7 @@ pub fn compile(dirs: &[PathBuf]) -> (Option<RuleSet>, CompileReport) {
     let mut files = Vec::new();
 
     for path in rule_files(dirs) {
-        let src = match std::fs::read(&path) {
+        let src = match read_rules_file(&path) {
             Ok(s) => s,
             Err(e) => {
                 report.errors.push(format!("{}: {e}", path.display()));
@@ -158,20 +235,18 @@ pub fn compile(dirs: &[PathBuf]) -> (Option<RuleSet>, CompileReport) {
 }
 
 impl RuleSet {
-    /// Serialized form: `version\n` + YARA-X compiled rules.
+    /// Serialized form: `version\n` + YARA-X compiled rules, stored encoded.
     pub fn save(&self, path: &Path) -> Result<()> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(self.version.as_bytes());
         bytes.push(b'\n');
         bytes.extend_from_slice(&self.rules.serialize().context("serializing rules")?);
-        let tmp = path.with_extension("tmp");
-        std::fs::write(&tmp, &bytes)?;
-        std::fs::rename(&tmp, path)?;
+        write_encoded(path, &bytes)?;
         Ok(())
     }
 
     pub fn load(path: &Path) -> Result<Self> {
-        let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+        let bytes = read_rules_file(path).with_context(|| format!("reading {}", path.display()))?;
         let nl = bytes
             .iter()
             .position(|b| *b == b'\n')
@@ -430,6 +505,30 @@ rule Unscored_Rule {
         assert!(result.is_err());
         assert_eq!(seen_during_compile.get(), Some(2), "old rules were not active during the compile");
         assert!(engine.rules().is_some(), "a failed recompile must not drop the working rules");
+    }
+
+    #[test]
+    fn rule_files_are_stored_encoded() {
+        let dir = tempfile::tempdir().unwrap();
+        // A plain feed file from an older version is converted.
+        std::fs::write(dir.path().join("feed.yar"), TEST_RULE).unwrap();
+        let before = fingerprint(&[dir.path().to_path_buf()]);
+        assert!(!migrate_plain_feeds(dir.path()));
+        assert!(!dir.path().join("feed.yar").exists());
+        let raw = std::fs::read(dir.path().join("feed.yarx")).unwrap();
+        assert!(!raw.windows(8).any(|w| w == b"SENTINEL"), "plaintext rule content on disk");
+        // Same rules, same namespace, same fingerprint: no needless recompile.
+        assert_eq!(fingerprint(&[dir.path().to_path_buf()]), before);
+        let (set, report) = compile(&[dir.path().to_path_buf()]);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        let set = set.unwrap();
+        assert_eq!(set.rule_count, 2);
+
+        let compiled = dir.path().join("compiled.bin");
+        set.save(&compiled).unwrap();
+        assert!(std::fs::read(&compiled).unwrap().starts_with(ENCODED_MAGIC));
+        assert_eq!(RuleSet::load(&compiled).unwrap().rule_count, 2);
+        assert_eq!(decode(encode(b"abc")), b"abc");
     }
 
     #[test]

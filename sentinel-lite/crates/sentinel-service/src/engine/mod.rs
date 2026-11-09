@@ -1151,6 +1151,10 @@ impl Engine {
         let dirs = yara::rule_dirs(&self.paths);
         let compiled = yara::compiled_path(&self.paths);
         let _ = std::fs::create_dir_all(yara::feeds_dir(&self.paths));
+        if yara::migrate_plain_feeds(&yara::feeds_dir(&self.paths)) {
+            // The old plain feed was blocked by antivirus: download it again soon.
+            self.db.set_counter("last_signature_update", 0);
+        }
         let result = self
             .yara
             .load_or_compile(&dirs, &compiled, || compile_rules(&self.paths, None))
@@ -1174,12 +1178,14 @@ impl Engine {
         let rules = update::fetch_yara_zip(url)?;
         let dir = yara::feeds_dir(&self.paths);
         std::fs::create_dir_all(&dir)?;
-        let dest = dir.join("yara-forge-core.yar");
-        if std::fs::read(&dest).map(|old| old == rules).unwrap_or(false) {
+        // Stored encoded: antivirus products block plain YARA rule files (error 225).
+        let dest = dir.join(format!("yara-forge-core.{}", yara::ENCODED_EXT));
+        let _ = std::fs::remove_file(dir.join("yara-forge-core.yar")); // written by older versions
+        if yara::read_rules_file(&dest).map(|old| old == rules).unwrap_or(false) {
             return Ok("YARA rules already current".into());
         }
-        let candidate = dir.join("yara-forge-core.yar.new");
-        std::fs::write(&candidate, &rules)?;
+        let candidate = dir.join("yara-forge-core.candidate");
+        std::fs::write(&candidate, yara::encode(&rules))?;
         if let Err(e) = compile_rules(&self.paths, Some(&candidate)) {
             let _ = std::fs::remove_file(&candidate);
             anyhow::bail!("downloaded rules rejected: {e:#}");
@@ -1562,7 +1568,7 @@ pub fn compile_rules(paths: &AppPaths, validate_only: Option<&Path>) -> anyhow::
 /// The body of `sentinel-service yara-compile` / `yara-validate`.
 pub fn compile_rules_in_process(paths: &AppPaths, validate_only: Option<&Path>) -> anyhow::Result<String> {
     if let Some(file) = validate_only {
-        let n = yara::validate(&std::fs::read(file)?)?;
+        let n = yara::validate(&yara::read_rules_file(file)?)?;
         return Ok(format!("{n} rules valid"));
     }
     let started = Instant::now();
