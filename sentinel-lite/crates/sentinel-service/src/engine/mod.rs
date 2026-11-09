@@ -826,6 +826,18 @@ impl Engine {
             .any(|t| t.sha256 == sha256)
     }
 
+    /// Is this Vigil's own uninstaller? NSIS copies `uninstall.exe` to
+    /// `%TEMP%\~nsuN.tmp\Un.exe` and runs it from there: unsigned, from Temp, so
+    /// Execution Guard would kill it and uninstalling would silently do nothing.
+    /// Matched by content against the copy in the (administrator-only) install folder.
+    pub fn is_own_uninstaller(&self, sha256: &str) -> bool {
+        let Some(dir) = crate::platform::install_dir() else { return false };
+        if !crate::platform::is_protected_dir(&dir) {
+            return false;
+        }
+        hasher::sha256_file(&dir.join("uninstall.exe"), 64 * 1024 * 1024).is_ok_and(|(h, _)| h == sha256)
+    }
+
     /// Check for (and install) a newer Vigil release. Blocking.
     pub fn check_app_update(&self) -> Result<String, String> {
         if self.app_update_running.swap(true, Ordering::AcqRel) {

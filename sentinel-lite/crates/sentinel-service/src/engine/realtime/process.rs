@@ -201,7 +201,9 @@ fn handle_start(engine: &Engine, images: &mut HashMap<u32, PathBuf>, ev: &Proces
     // 4) Execution Guard: unsigned programs from Downloads / Temp / AppData.
     if settings.block_untrusted_risky {
         if let Some(folder) = heuristics::risky_location(&image) {
-            let trusted = image_sha.as_deref().is_some_and(|h| engine.is_trusted_app(h));
+            let trusted = image_sha
+                .as_deref()
+                .is_some_and(|h| engine.is_trusted_app(h) || engine.is_own_uninstaller(h));
             if !trusted && engine.may_suspend(ev.pid, &image) && platform::terminate(ev.pid) {
                 engine.emit(
                     EventKind::ProcessBlocked,
