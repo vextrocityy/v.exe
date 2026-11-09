@@ -179,12 +179,42 @@ fn agent(url: &str) -> ureq::Agent {
         .build()
 }
 
+/// GitHub's release downloads (and other CDNs) answer 502/503/504 now and then
+/// for a few seconds. Retry those and connection failures a few times with a
+/// growing pause; anything else (404, 403, TLS errors) fails at once.
+fn get_with_retry(url: &str) -> Result<ureq::Response> {
+    let pauses: &[u64] = if cfg!(test) { &[0, 0] } else { &[2, 6, 15] };
+    let mut attempt = 0;
+    loop {
+        match agent(url).get(url).call() {
+            Ok(resp) => return Ok(resp),
+            Err(e) => {
+                let transient = match &e {
+                    ureq::Error::Status(code, _) => matches!(code, 429 | 500 | 502 | 503 | 504),
+                    ureq::Error::Transport(t) => matches!(
+                        t.kind(),
+                        ureq::ErrorKind::ConnectionFailed | ureq::ErrorKind::Io | ureq::ErrorKind::Dns
+                    ),
+                };
+                match pauses.get(attempt) {
+                    Some(secs) if transient => {
+                        tracing::info!(url, error = %e, retry_in_secs = secs, "transient download error, retrying");
+                        std::thread::sleep(std::time::Duration::from_secs(*secs));
+                        attempt += 1;
+                    }
+                    _ => return Err(anyhow::Error::new(e).context(format!("GET {url}"))),
+                }
+            }
+        }
+    }
+}
+
 pub fn fetch(url: &str) -> Result<Vec<u8>> {
     anyhow::ensure!(
         crate::settings::is_allowed_update_url(url),
         "refusing non-HTTPS update URL"
     );
-    let resp = agent(url).get(url).call().with_context(|| format!("GET {url}"))?;
+    let resp = get_with_retry(url)?;
     let mut buf = Vec::new();
     resp.into_reader().take(MAX_DOWNLOAD_BYTES + 1).read_to_end(&mut buf)?;
     anyhow::ensure!(
@@ -315,6 +345,34 @@ pub fn run(db: &Database, sources: &Sources<'_>, keys: &[VerifyingKey]) -> Outco
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Serve the given raw HTTP responses, one per connection, on a loopback port.
+    fn serve_raw(responses: Vec<&'static str>) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for r in responses {
+                let (mut sock, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 2048];
+                let _ = std::io::Read::read(&mut sock, &mut buf);
+                let _ = std::io::Write::write_all(&mut sock, r.as_bytes());
+            }
+        });
+        format!("http://127.0.0.1:{}/file", addr.port())
+    }
+
+    #[test]
+    fn transient_server_errors_are_retried_but_not_found_is_not() {
+        let gw = "HTTP/1.1 504 Gateway Time-out\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        let ok = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello";
+        let url = serve_raw(vec![gw, gw, ok]);
+        assert_eq!(fetch(&url).unwrap(), b"hello");
+
+        let nf = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        let url = serve_raw(vec![nf, ok]);
+        let err = format!("{:#}", fetch(&url).unwrap_err());
+        assert!(err.contains("404"), "{err}");
+    }
     use std::io::Write;
     use std::net::TcpListener;
 

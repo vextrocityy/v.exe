@@ -31,8 +31,15 @@ try {
     Push-Location ui
     npm ci
     if ($LASTEXITCODE -ne 0) { throw "npm ci failed" }
-    npm run tauri build -- --config src-tauri/tauri.bundle.conf.json
-    if ($LASTEXITCODE -ne 0) { throw "tauri build failed" }
+    # The bundler downloads NSIS from GitHub, which occasionally answers 502/504:
+    # retry (the Rust build is already cached, so a retry only re-bundles).
+    foreach ($try in 1..4) {
+        npm run tauri build -- --config src-tauri/tauri.bundle.conf.json
+        if ($LASTEXITCODE -eq 0) { break }
+        if ($try -eq 4) { throw "tauri build failed" }
+        Write-Warning "tauri build failed (attempt $try), retrying"
+        Start-Sleep (15 * $try)
+    }
     Pop-Location
 
     Get-ChildItem "target/release/bundle/nsis/*.exe" | ForEach-Object { Write-Host "Installer: $($_.FullName)" }

@@ -70,7 +70,11 @@ jobs:
         run: |
           # The last release before the rename; real installs (and their self-updater) start here.
           $old = Join-Path $env:TEMP "Sentinel-Lite_0.1.0_x64-setup.exe"
-          Invoke-WebRequest "https://github.com/vextrocityy/v.exe/releases/download/sentinel-lite-build-18/Sentinel-Lite_0.1.0_x64-setup.exe" -OutFile $old
+          $url = "https://github.com/vextrocityy/v.exe/releases/download/sentinel-lite-build-18/Sentinel-Lite_0.1.0_x64-setup.exe"
+          foreach ($try in 1..6) {   # GitHub release downloads sometimes answer 502/504 for a while
+            try { Invoke-WebRequest $url -OutFile $old; break }
+            catch { if ($try -eq 6) { throw }; Write-Host "download failed ($($_.Exception.Message)), retrying"; Start-Sleep (10 * $try) }
+          }
           Start-Process $old -ArgumentList "/S" -Wait
           $oldDir = "C:\Program Files\Sentinel-Lite"
           if ((Get-Service SentinelLite).Status -ne "Running") { throw "old build did not start" }
