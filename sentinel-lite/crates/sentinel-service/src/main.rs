@@ -10,6 +10,7 @@
 //!   sentinel-service events [n]   print the last n security events (JSON)
 //!   sentinel-service settings     print the active settings (JSON)
 //!   sentinel-service quarantine   list quarantined items (JSON)
+//!   sentinel-service inspect <path>...   detailed report for files/folders (changes nothing)
 //!   sentinel-service app-update   check for and install a newer release now
 //!   sentinel-service version      print version and CI build number
 //!   sentinel-service keygen       create an Ed25519 update-signing keypair
@@ -82,6 +83,16 @@ fn main() -> Result<()> {
         Some("events") => {
             let limit = args.get(1).and_then(|n| n.parse().ok()).unwrap_or(50);
             let resp = ipc::client::request(&sentinel_protocol::Request::GetEvents { limit, before_id: None })?;
+            println!("{}", serde_json::to_string_pretty(&resp)?);
+            Ok(())
+        }
+        Some("inspect") => {
+            // File Check from the command line: detailed report, nothing is changed.
+            let paths: Vec<String> = args[1..].to_vec();
+            if paths.is_empty() {
+                bail!("usage: sentinel-service inspect <file-or-folder> [...]");
+            }
+            let resp = ipc::client::request(&sentinel_protocol::Request::InspectPaths { paths })?;
             println!("{}", serde_json::to_string_pretty(&resp)?);
             Ok(())
         }
@@ -238,6 +249,7 @@ fn elevated_request(hex: &str) -> Result<()> {
         Request::UpdateSettings { .. }
             | Request::RestoreQuarantine { .. }
             | Request::ProcessAction { .. }
+            | Request::QuarantinePath { .. }
             | Request::TrustApp { .. }
             | Request::EnableHardening { .. }
     ) {

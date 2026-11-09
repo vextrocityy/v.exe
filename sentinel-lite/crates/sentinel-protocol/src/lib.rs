@@ -12,7 +12,7 @@ pub const PIPE_NAME: &str = r"\\.\pipe\sentinel_lite_ipc";
 /// Hard upper bound on one frame; protects the service from memory exhaustion.
 pub const MAX_FRAME_BYTES: u32 = 4 * 1024 * 1024;
 /// Bumped on any incompatible change; the UI refuses to talk to a different version.
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 /// Placeholder sent instead of stored secrets; sending it back means "unchanged".
 pub const SECRET_MASK: &str = "********";
 
@@ -123,6 +123,44 @@ pub struct HardeningCheck {
     pub detail: String,
     /// The engine can switch this on (`Request::EnableHardening`).
     pub fixable: bool,
+}
+
+/// Outcome of a manual file check (File Check page).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Verdict {
+    Malicious,
+    Suspicious,
+    NoThreats,
+    /// Could not be read / hashed.
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Detection {
+    pub name: String,
+    /// "hash: official@…", "hash: community", "yara: <namespace>", "archive member", …
+    pub source: String,
+    pub score: Option<u32>,
+    pub description: Option<String>,
+}
+
+/// Everything Sentinel-Lite knows about one file. Produced without changing the file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileReport {
+    pub path: String,
+    pub size: u64,
+    pub sha256: Option<String>,
+    pub verdict: Verdict,
+    /// One-line explanation of the verdict.
+    pub summary: String,
+    pub detections: Vec<Detection>,
+    /// Valid Authenticode signature (Windows); `None` when not applicable / unknown.
+    pub signed: Option<bool>,
+    /// Mark of the Web: where the file was downloaded from, if Windows recorded it.
+    pub downloaded_from: Option<String>,
+    /// Weaker red flags (double extension, RTLO trick, packed executable, …).
+    pub indicators: Vec<String>,
 }
 
 /// A program the user explicitly trusts, pinned by content hash so a
@@ -318,6 +356,15 @@ pub enum Request {
     },
     /// Look for a newer Sentinel-Lite release now and install it if found.
     CheckAppUpdate,
+    /// Check files / folders on demand and report, without changing anything.
+    InspectPaths {
+        paths: Vec<String>,
+    },
+    /// Move a file the user checked into quarantine (needs elevation).
+    QuarantinePath {
+        path: String,
+        threat_name: Option<String>,
+    },
     GetEvents {
         limit: u32,
         before_id: Option<i64>,
@@ -354,6 +401,7 @@ pub enum Response {
     Quarantine(Vec<QuarantineItem>),
     Settings(Settings),
     Event(SecurityEvent),
+    Inspection { reports: Vec<FileReport>, truncated: bool },
     Ok,
     Error { code: ErrorCode, message: String },
 }

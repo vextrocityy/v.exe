@@ -138,6 +138,18 @@ function finishScan(cancelled: boolean) {
   push({ kind: "scan_finished", severity: "info", title: `Scan ${cancelled ? "cancelled" : "complete"}: 0 threat(s)`, detail: `${scan.files_scanned} files scanned, ${scan.files_skipped} skipped`, path: null, pid: null });
 }
 
+function mockReport(path: string) {
+  const name = path.split(/[\\/]/).pop() ?? path;
+  const sha = Array.from(name).reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7).toString(16).padStart(8, "0").repeat(8);
+  if (/\.pdf\.exe$/i.test(name))
+    return { path, size: 734_208, sha256: sha, verdict: "malicious", summary: "Malicious: matches YARA.SIGNATURE_BASE_Agent_Tesla_Loader. Quarantine it.", detections: [{ name: "YARA.SIGNATURE_BASE_Agent_Tesla_Loader", source: "YARA rule (yara_forge_core)", score: 85, description: "Detects AgentTesla loader" }], signed: false, downloaded_from: "https://files.example-share.com/d/8f2a/invoice.pdf.exe", indicators: ["Double extension: looks like a .pdf but is a .exe program", "Program stored in Downloads, where downloaded malware usually lands"] };
+  if (/\.zip$/i.test(name))
+    return { path, size: 4_402_117, sha256: sha, verdict: "no_threats", summary: "No threats found by signatures, YARA rules or archive scanning.", detections: [], signed: null, downloaded_from: null, indicators: [] };
+  if (/\.ps1$/i.test(name))
+    return { path, size: 2_310, sha256: sha, verdict: "suspicious", summary: "Suspicious: matches YARA.Suspicious_PowerShell_Download with low confidence (60). Review before opening.", detections: [{ name: "YARA.Suspicious_PowerShell_Download", source: "YARA rule (yara_forge_core)", score: 60, description: null }], signed: null, downloaded_from: "the internet", indicators: [] };
+  return { path, size: 81_920_000, sha256: sha, verdict: "no_threats", summary: "No threats found. The program has a valid digital signature.", detections: [], signed: true, downloaded_from: "https://www.example.com/download/setup.exe", indicators: [] };
+}
+
 export const mock = {
   async invoke<T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> {
     await new Promise((r) => setTimeout(r, 60));
@@ -149,6 +161,18 @@ export const mock = {
         case "acknowledge_threats": return undefined;
         case "trust_app":
           settings.trusted_apps = [...settings.trusted_apps, { path: args.path as string, sha256: "ab".repeat(32) }];
+          return undefined;
+        case "inspect_paths":
+          return {
+            truncated: false,
+            reports: (args.paths as string[]).map((path) => mockReport(path)),
+          };
+        case "quarantine_path":
+          quarantine = [...quarantine, { id: Math.random().toString(16).slice(2), original_path: args.path as string, sha256: "cd".repeat(32), threat_name: (args.threatName as string) ?? "Manual.UserQuarantine", size: 1024, quarantined_at: now() }];
+          return undefined;
+        case "pick_files":
+          return ["C:\\Users\\alex\\Downloads\\invoice.pdf.exe", "C:\\Users\\alex\\Downloads\\holiday-photos.zip", "C:\\Users\\alex\\Downloads\\setup.exe"];
+        case "open_virustotal":
           return undefined;
         case "check_app_update":
           appUpdate = "Checking for app updates…";

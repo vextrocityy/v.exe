@@ -151,6 +151,9 @@ async fn dispatch(engine: &Arc<Engine>, req: Request, peer: &Peer) -> Response {
         Request::RestoreQuarantine { .. } if !peer.elevated => {
             return elevation_required("releases a detected threat");
         }
+        Request::QuarantinePath { .. } if !peer.elevated => {
+            return elevation_required("moves a file of your choice into quarantine");
+        }
         Request::TrustApp { .. } if !peer.elevated => {
             return elevation_required("lets an unsigned program run from a risky folder");
         }
@@ -210,6 +213,22 @@ async fn dispatch(engine: &Arc<Engine>, req: Request, peer: &Peer) -> Response {
                 Ok(_) => Response::Ok,
                 Err(err) => Response::error(ErrorCode::BadRequest, format!("{err:#}")),
             })
+            .await
+        }
+        Request::InspectPaths { paths } => {
+            blocking(move || {
+                let (reports, truncated) = crate::engine::inspect::inspect_paths(&e, &paths);
+                Response::Inspection { reports, truncated }
+            })
+            .await
+        }
+        Request::QuarantinePath { path, threat_name } => {
+            blocking(
+                move || match e.quarantine_path(std::path::Path::new(&path), threat_name) {
+                    Ok(_) => Response::Ok,
+                    Err(err) => Response::error(ErrorCode::BadRequest, format!("{err:#}")),
+                },
+            )
             .await
         }
         Request::CheckAppUpdate => Ok(match e.start_app_update() {
@@ -404,6 +423,33 @@ mod tests {
             "{r:?}"
         );
         let r = roundtrip(&mut user, &Request::RestoreQuarantine { id: "x".into() }).await;
+        assert!(
+            matches!(
+                r,
+                Response::Error {
+                    code: ErrorCode::ElevationRequired,
+                    ..
+                }
+            ),
+            "{r:?}"
+        );
+        // Checking files is open to everyone; quarantining an arbitrary path is not.
+        let r = roundtrip(
+            &mut user,
+            &Request::InspectPaths {
+                paths: vec!["/nonexistent".into()],
+            },
+        )
+        .await;
+        assert!(matches!(r, Response::Inspection { .. }), "{r:?}");
+        let r = roundtrip(
+            &mut user,
+            &Request::QuarantinePath {
+                path: "/etc/hostname".into(),
+                threat_name: None,
+            },
+        )
+        .await;
         assert!(
             matches!(
                 r,

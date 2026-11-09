@@ -139,6 +139,16 @@ Data lives in `%ProgramData%\SentinelLite\` (`sentinel.db`, `quarantine\`, `sign
 15. **Windows hardening panel.** The dashboard checks LSA protection (blocks LSASS credential
     dumping), the firewall profiles and UAC, and can switch LSA protection on.
 
+### File Check
+
+Drop files or folders onto **File Check** in the dashboard (or click *Choose files…*), or run
+`sentinel-service inspect <path>`. Each file gets a read-only report: verdict (malicious /
+suspicious / no threats), the hash-list match, every matching YARA rule with its score, malicious
+archive members, Authenticode signature status, where it was downloaded from (Windows' Mark of the
+Web), and name tricks (`invoice.pdf.exe`, right-to-left characters, packed executables). Nothing is
+moved, changed or uploaded; *Look up on VirusTotal* only opens the hash's page in your browser.
+*Quarantine* from a report asks for administrator approval. Up to 500 files per check.
+
 ### Automatic app updates
 
 Release builds carry their CI build number (`sentinel-service version`). Every 6 hours, or on

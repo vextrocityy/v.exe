@@ -148,3 +148,29 @@ export function toneOf(state: ProtectionState | undefined): StateTone {
   if (state === "threat_detected") return "danger";
   return "warn";
 }
+
+export type Verdict = "malicious" | "suspicious" | "no_threats" | "error";
+
+export interface Detection {
+  name: string;
+  source: string;
+  score: number | null;
+  description: string | null;
+}
+
+export interface FileReport {
+  path: string;
+  size: number;
+  sha256: string | null;
+  verdict: Verdict;
+  summary: string;
+  detections: Detection[];
+  signed: boolean | null;
+  downloaded_from: string | null;
+  indicators: string[];
+}
+
+export interface Inspection {
+  reports: FileReport[];
+  truncated: boolean;
+}

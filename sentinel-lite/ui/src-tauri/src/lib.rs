@@ -10,7 +10,9 @@ use std::time::Duration;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, WindowEvent};
+use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_notification::NotificationExt;
+use tauri_plugin_opener::OpenerExt;
 
 /// Run blocking pipe I/O off the async runtime.
 async fn call(req: Request) -> Result<Response, ClientError> {
@@ -102,6 +104,52 @@ async fn enable_hardening(id: String) -> Result<(), String> {
 #[tauri::command]
 async fn check_app_update() -> Result<(), String> {
     call(Request::CheckAppUpdate).await.map(|_| ()).map_err(Into::into)
+}
+
+#[derive(serde::Serialize)]
+struct Inspection {
+    reports: Vec<FileReport>,
+    truncated: bool,
+}
+
+/// File Check: detailed, read-only report for dropped or picked files/folders.
+#[tauri::command]
+async fn inspect_paths(paths: Vec<String>) -> Result<Inspection, String> {
+    match call(Request::InspectPaths { paths }).await? {
+        Response::Inspection { reports, truncated } => Ok(Inspection { reports, truncated }),
+        r => Err(unexpected(r)),
+    }
+}
+
+#[tauri::command]
+async fn quarantine_path(path: String, threat_name: Option<String>) -> Result<(), String> {
+    call_privileged(Request::QuarantinePath { path, threat_name }).await.map(|_| ())
+}
+
+/// Native "Choose files" dialog (runs in Rust, so the webview needs no file-system permission).
+#[tauri::command]
+async fn pick_files(app: AppHandle) -> Result<Vec<String>, String> {
+    let picked = tauri::async_runtime::spawn_blocking(move || app.dialog().file().blocking_pick_files())
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(picked
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|p| p.into_path().ok())
+        .map(|p| p.display().to_string())
+        .collect())
+}
+
+/// Open the VirusTotal report for a hash in the browser. Only the hash is
+/// in the URL; the file itself is never uploaded.
+#[tauri::command]
+fn open_virustotal(app: AppHandle, sha256: String) -> Result<(), String> {
+    if sha256.len() != 64 || !sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("not a SHA-256".into());
+    }
+    app.opener()
+        .open_url(format!("https://www.virustotal.com/gui/file/{sha256}"), None::<&str>)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -266,6 +314,8 @@ pub fn run() {
         // Must be first: a second launch focuses the running dashboard instead.
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             build_tray(app)?;
             // Started at login by the installer with --minimized: stay in the tray.
@@ -292,6 +342,10 @@ pub fn run() {
             process_action,
             trust_app,
             check_app_update,
+            inspect_paths,
+            quarantine_path,
+            pick_files,
+            open_virustotal,
             enable_hardening,
             get_events,
             list_quarantine,

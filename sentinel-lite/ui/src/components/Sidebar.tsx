@@ -1,12 +1,13 @@
-import { Activity, LayoutDashboard, Lock, Settings, Shield } from "lucide-react";
+import { Activity, FileSearch, LayoutDashboard, Lock, Settings, Shield } from "lucide-react";
 import type { EngineStatus } from "../lib/types";
 import { toneOf } from "../lib/types";
 import { formatBytes } from "../lib/format";
 
-export type Page = "dashboard" | "activity" | "quarantine" | "settings";
+export type Page = "dashboard" | "filecheck" | "activity" | "quarantine" | "settings";
 
 const NAV: { id: Page; label: string; icon: typeof Shield }[] = [
   { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
+  { id: "filecheck", label: "File Check", icon: FileSearch },
   { id: "activity", label: "Activity", icon: Activity },
   { id: "quarantine", label: "Quarantine", icon: Lock },
   { id: "settings", label: "Settings", icon: Settings },

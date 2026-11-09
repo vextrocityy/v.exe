@@ -4,11 +4,13 @@ import { useEngine } from "./hooks/useEngine";
 import { isTauri } from "./lib/api";
 import { ActivityPage } from "./pages/Activity";
 import { Dashboard } from "./pages/Dashboard";
+import { FileCheckPage } from "./pages/FileCheck";
 import { QuarantinePage } from "./pages/Quarantine";
 import { SettingsPage } from "./pages/Settings";
 
 const TITLES: Record<Page, string> = {
   dashboard: "Overview",
+  filecheck: "File Check",
   activity: "Activity",
   quarantine: "Quarantine",
   settings: "Settings",
@@ -34,6 +36,7 @@ export default function App() {
         )}
         <div className="px-8 pb-8">
           {page === "dashboard" && <Dashboard status={status} events={events} refresh={refresh} onSeeAll={() => setPage("activity")} />}
+          {page === "filecheck" && <FileCheckPage />}
           {page === "activity" && <ActivityPage events={events} />}
           {page === "quarantine" && <QuarantinePage onChanged={refresh} />}
           {page === "settings" && <SettingsPage />}

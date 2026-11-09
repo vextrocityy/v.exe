@@ -5,6 +5,7 @@ pub mod appupdate;
 pub mod archive;
 pub mod hasher;
 pub mod heuristics;
+pub mod inspect;
 pub mod netguard;
 pub mod quarantine;
 pub mod realtime;
@@ -263,7 +264,7 @@ impl Engine {
     /// Look inside ZIP / ISO files. Clean results are cached per archive hash,
     /// rule-set version and signature count, so archives are not reopened on
     /// every scan; a match inside quarantines the whole archive.
-    fn archive_check(&self, path: &Path, sha256: &str, size: u64) -> Option<SignatureHit> {
+    pub(crate) fn archive_check(&self, path: &Path, sha256: &str, size: u64) -> Option<SignatureHit> {
         let s = self.settings();
         let limits = archive::Limits::default();
         if !s.archive_scanning || size == 0 || size > limits.max_total {
@@ -530,6 +531,32 @@ impl Engine {
             None,
         );
         Ok(restored)
+    }
+
+    /// Quarantine a file the user checked on the File Check page.
+    pub fn quarantine_path(&self, path: &Path, threat_name: Option<String>) -> Result<String> {
+        anyhow::ensure!(path.is_file(), "{} is not a file", path.display());
+        let (sha256, size) =
+            hasher::sha256_file(path, u64::MAX).map_err(|r| anyhow::anyhow!("cannot read the file: {r:?}"))?;
+        let name = threat_name
+            .filter(|n| !n.trim().is_empty())
+            .unwrap_or_else(|| "Manual.UserQuarantine".into());
+        let item = self.quarantine.isolate(&self.db, path, &sha256, &name)?;
+        let _ = size;
+        self.emit(
+            EventKind::ThreatQuarantined,
+            Severity::Info,
+            format!("{name} moved to quarantine by user"),
+            Some(format!("From File Check. Quarantine id {}", item.id)),
+            Some(path),
+            None,
+        );
+        if self.settings().startup_cleanup {
+            crate::util::contain("startup clean-up", || {
+                self.cleanup_startup(path, &item.id, &realtime::persistence::startup_folders())
+            });
+        }
+        Ok(item.id)
     }
 
     pub fn delete_quarantine(&self, id: &str) -> Result<()> {
@@ -1531,6 +1558,53 @@ rule Low_Confidence  { meta: score = 60 strings: $a = "LOW-CONFIDENCE-MARKER" co
         // The decoy was re-planted intact.
         assert!(engine.is_decoy(&decoy));
         assert_ne!(std::fs::read(&decoy).unwrap(), b"encrypted!");
+    }
+
+    #[test]
+    fn file_check_reports_verdicts_without_changing_files() {
+        let (dir, engine) = engine_with_rules(RULES);
+        let drop = dir.path().join("dropped");
+        std::fs::create_dir_all(drop.join("sub")).unwrap();
+
+        let known = drop.join("known.bin");
+        std::fs::write(&known, b"MZ known trojan bytes").unwrap();
+        add_sig(&engine, b"MZ known trojan bytes", "Trojan.Known");
+        let high = drop.join("sub").join("dropper.ps1");
+        std::fs::write(&high, b"HIGH-CONFIDENCE-MARKER").unwrap();
+        let low = drop.join("tool.ps1");
+        std::fs::write(&low, b"LOW-CONFIDENCE-MARKER").unwrap();
+        let trick = drop.join("invoice.pdf.exe");
+        std::fs::write(&trick, b"just some bytes").unwrap();
+        let clean = drop.join("notes.txt");
+        std::fs::write(&clean, b"shopping list").unwrap();
+
+        let (reports, truncated) = inspect::inspect_paths(&engine, &[drop.display().to_string()]);
+        assert!(!truncated);
+        assert_eq!(reports.len(), 5, "folder expanded recursively");
+        let by_name = |n: &str| reports.iter().find(|r| r.path.ends_with(n)).unwrap();
+        assert_eq!(by_name("known.bin").verdict, Verdict::Malicious);
+        assert_eq!(by_name("known.bin").detections[0].name, "Trojan.Known");
+        assert_eq!(by_name("dropper.ps1").verdict, Verdict::Malicious);
+        assert_eq!(by_name("dropper.ps1").detections[0].score, Some(90));
+        assert_eq!(by_name("tool.ps1").verdict, Verdict::Suspicious);
+        assert_eq!(by_name("invoice.pdf.exe").verdict, Verdict::Suspicious);
+        assert!(by_name("invoice.pdf.exe").summary.contains("double extension"));
+        assert_eq!(by_name("notes.txt").verdict, Verdict::NoThreats);
+        assert!(by_name("notes.txt").sha256.is_some());
+        // Checking changes nothing.
+        for p in [&known, &high, &low, &trick, &clean] {
+            assert!(p.exists());
+        }
+        assert_eq!(engine.db.quarantine_count(), 0);
+
+        // Missing path -> error report, not a failure.
+        let (r, _) = inspect::inspect_paths(&engine, &[dir.path().join("nope").display().to_string()]);
+        assert_eq!(r[0].verdict, Verdict::Error);
+
+        // The user can quarantine what they checked.
+        engine.quarantine_path(&known, Some("Trojan.Known".into())).unwrap();
+        assert!(!known.exists());
+        assert_eq!(engine.db.quarantine_count(), 1);
     }
 
     #[test]

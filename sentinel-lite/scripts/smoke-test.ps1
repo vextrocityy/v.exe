@@ -91,6 +91,22 @@ try {
     Set-Content $script "Write-Host 'hello'`n# SENTINEL-LITE-YARA-TEST-MARKER-7f3c9a" -Encoding ascii
     Wait-Until { -not (Test-Path $script) -and (Events | Where-Object { $_.title -like "YARA.Sentinel_SelfTest_Marker*" }) } "YARA rule match quarantined by File Shield"
 
+    # --- File Check: on-demand inspection reports, changes nothing ------------------
+    $fc = Join-Path $work "filecheck"; New-Item -ItemType Directory -Force $fc | Out-Null
+    Copy-Item $payload (Join-Path $fc "known.bin")
+    $trick = Join-Path $fc "invoice.pdf.exe"
+    Set-Content $trick "just some bytes" -Encoding ascii
+    Set-Content -Path $trick -Stream Zone.Identifier -Value "[ZoneTransfer]`r`nZoneId=3`r`nHostUrl=https://files.example.test/invoice.pdf.exe"
+    $reports = (Invoke-Svc inspect $fc | Out-String | ConvertFrom-Json).data.reports
+    $reports | Format-Table verdict, summary -AutoSize | Out-Host
+    $known = $reports | Where-Object { $_.path -like "*known.bin" }
+    $trickR = $reports | Where-Object { $_.path -like "*invoice.pdf.exe" }
+    if ($known.verdict -ne "malicious") { throw "FAIL: File Check verdict for known malware: $($known.verdict)" }
+    if ($trickR.verdict -ne "suspicious") { throw "FAIL: File Check verdict for double extension: $($trickR.verdict)" }
+    if ($trickR.downloaded_from -ne "https://files.example.test/invoice.pdf.exe") { throw "FAIL: Mark of the Web not read: '$($trickR.downloaded_from)'" }
+    if (-not ((Test-Path (Join-Path $fc "known.bin")) -and (Test-Path $trick))) { throw "FAIL: File Check changed files" }
+    Write-Host "PASS: File Check reported malicious / suspicious (with download origin) without touching files" -ForegroundColor Green
+
     # --- Archive scanning: payload inside a ZIP dropped in Downloads -----------------
     $zipSrc = Join-Path $work "zipsrc"; New-Item -ItemType Directory -Force $zipSrc | Out-Null
     Copy-Item $payload (Join-Path $zipSrc "invoice.pdf.exe")
