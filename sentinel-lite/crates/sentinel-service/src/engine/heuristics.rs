@@ -230,6 +230,59 @@ pub struct RansomwareAlert {
     pub notify: bool,
 }
 
+/// Folders where programs create and rewrite throw-away files all the time
+/// (installers, updaters, browser caches). Ransomware gains nothing there, so
+/// the mass-modification detector ignores them (File Shield still scans drops).
+pub fn is_churn_location(p: &Path) -> bool {
+    let s = p.to_string_lossy().to_ascii_lowercase().replace('/', "\\");
+    [
+        "\\appdata\\local\\temp\\",
+        "\\windows\\temp\\",
+        "\\appdata\\local\\microsoft\\windows\\inetcache\\",
+        "\\appdata\\local\\packages\\",
+        "\\appdata\\local\\google\\chrome\\user data\\",
+        "\\appdata\\local\\microsoft\\edge\\user data\\",
+        "\\appdata\\local\\mozilla\\firefox\\profiles\\",
+        "\\appdata\\local\\crashdumps\\",
+    ]
+    .iter()
+    .any(|frag| s.contains(frag))
+}
+
+/// Remembers files created in the last minute. Writing into a brand-new file is
+/// an extraction, a download or build output; ransomware rewrites files that
+/// already existed. Only modifications of existing files feed the detector.
+#[derive(Default)]
+pub struct FreshFiles {
+    created: HashMap<PathBuf, Instant>,
+}
+
+impl FreshFiles {
+    const TTL: Duration = Duration::from_secs(60);
+
+    pub fn created(&mut self, path: &Path, now: Instant) {
+        if self.created.len() > 20_000 {
+            self.created.retain(|_, t| now.duration_since(*t) < Self::TTL);
+            if self.created.len() > 20_000 {
+                self.created.clear();
+            }
+        }
+        self.created.insert(path.to_path_buf(), now);
+    }
+
+    pub fn is_fresh(&self, path: &Path, now: Instant) -> bool {
+        self.created.get(path).is_some_and(|t| now.duration_since(*t) < Self::TTL)
+    }
+}
+
+/// Should this change count towards the mass-modification detector?
+pub fn counts_for_ransomware(path: &Path, activity: FileActivity, fresh: &FreshFiles, now: Instant) -> bool {
+    if is_churn_location(path) {
+        return false;
+    }
+    !(activity == FileActivity::Modified && fresh.is_fresh(path, now))
+}
+
 pub struct RansomwareDetector {
     window: Duration,
     weight_threshold: u32,
@@ -335,6 +388,26 @@ impl RansomwareDetector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn updates_and_extractions_do_not_look_like_ransomware() {
+        let now = Instant::now();
+        let mut fresh = FreshFiles::default();
+        // Chrome unpacking an update in Temp: ignored entirely.
+        let tmp = Path::new(r"C:\Users\cranc\AppData\Local\Temp\chrome_BITS_21388_923234217\decoded_xz");
+        assert!(!counts_for_ransomware(tmp, FileActivity::Modified, &fresh, now));
+        assert!(!counts_for_ransomware(tmp, FileActivity::RenamedNewExtension, &fresh, now));
+        // A file just created (zip extracted into Documents) and then written: not counted.
+        let new = Path::new(r"C:\Users\cranc\Documents\photos\img_001.jpg");
+        fresh.created(new, now);
+        assert!(!counts_for_ransomware(new, FileActivity::Modified, &fresh, now + Duration::from_secs(2)));
+        // A minute later, rewriting it is an ordinary modification again.
+        assert!(counts_for_ransomware(new, FileActivity::Modified, &fresh, now + Duration::from_secs(61)));
+        // Rewriting or renaming an existing document always counts.
+        let doc = Path::new(r"C:\Users\cranc\Documents\taxes.xlsx");
+        assert!(counts_for_ransomware(doc, FileActivity::Modified, &fresh, now));
+        assert!(counts_for_ransomware(new, FileActivity::RenamedNewExtension, &fresh, now));
+    }
 
     #[test]
     fn benign_process_scores_low() {

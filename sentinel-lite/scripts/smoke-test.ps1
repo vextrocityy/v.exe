@@ -80,6 +80,13 @@ try {
     Set-Content "$data\network\blocklist.txt" "192.0.2.0/24" -Encoding ascii
     $downloads = Join-Path $env:USERPROFILE "Downloads"
     New-Item -ItemType Directory -Force $downloads | Out-Null
+    # Existing documents for the encryption-burst test (ransomware rewrites files
+    # that already exist; brand-new files being written are extractions/downloads).
+    $burst = Join-Path $env:USERPROFILE "Documents\sentinel-entropy-test"
+    foreach ($n in 0..99) {
+        $dir = Join-Path $burst "folder$($n % 4)"; New-Item -ItemType Directory -Force $dir | Out-Null
+        Set-Content (Join-Path $dir "report$n.txt") ("Quarterly report $n. " * 400) -Encoding ascii
+    }
 
     # --- install as a real service --------------------------------------------------
     Invoke-Svc install | Out-Host
@@ -148,14 +155,29 @@ try {
 
     # --- Encryption burst (entropy) suspends the heavy writer ------------------------
     Start-Sleep 16   # decoy and entropy responses share a 15 s debounce
+    # Not ransomware: an updater unpacking in Temp, and an archive extracted into
+    # Documents (many brand-new files across folders). Neither may raise an alert.
+    $before = @(Events | Where-Object { $_.title -like "Possible ransomware*" }).Count
+    $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+    foreach ($root in (Join-Path $env:TEMP "vigil-unpack-test"), (Join-Path $env:USERPROFILE "Documents\vigil-extract-test")) {
+        foreach ($n in 0..99) {
+            $dir = Join-Path $root "part$($n % 6)"; New-Item -ItemType Directory -Force $dir | Out-Null
+            $bytes = New-Object byte[] 8192; $rng.GetBytes($bytes)
+            [IO.File]::WriteAllBytes((Join-Path $dir "chunk$n.bin"), $bytes)
+        }
+    }
+    Start-Sleep 4
+    if (@(Events | Where-Object { $_.title -like "Possible ransomware*" -or $_.title -eq "Ransomware behaviour: files are being encrypted" }).Count -gt $before) {
+        throw "FAIL: unpacking / extracting new files was reported as ransomware"
+    }
+    Write-Host "PASS: updater unpacking in Temp and archive extraction were not flagged" -ForegroundColor Green
+    Remove-Item (Join-Path $env:TEMP "vigil-unpack-test"), (Join-Path $env:USERPROFILE "Documents\vigil-extract-test") -Recurse -Force
+
     $load2 = Start-Process (New-Writer "writer-entropy.exe") -ArgumentList "90" -PassThru -WindowStyle Hidden
     Start-Sleep 2
-    $burst = Join-Path $env:USERPROFILE "Documents\sentinel-entropy-test"
-    $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
-    foreach ($n in 0..99) {
-        $dir = Join-Path $burst "folder$($n % 4)"; New-Item -ItemType Directory -Force $dir | Out-Null
+    foreach ($n in 0..99) {   # "encrypt" the existing documents
         $bytes = New-Object byte[] 8192; $rng.GetBytes($bytes)
-        [IO.File]::WriteAllBytes((Join-Path $dir "report$n.txt"), $bytes)
+        [IO.File]::WriteAllBytes((Join-Path $burst "folder$($n % 4)\report$n.txt"), $bytes)
     }
     Wait-Until { Events | Where-Object { $_.title -eq "Ransomware behaviour: files are being encrypted" } } "encryption burst detected (entropy)" 20
     Wait-Until { Events | Where-Object { $_.kind -eq "process_suspended" -and $_.pid -eq $load2.Id } } "heavy writer suspended after the encryption burst" 20

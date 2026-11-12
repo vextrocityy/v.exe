@@ -115,7 +115,10 @@ Data lives in `%ProgramData%\SentinelLite\` (`sentinel.db`, `quarantine\`, `sign
    `\Microsoft\` tasks that run system binaries with nothing suspicious stay quiet. Activity offers
    **Disable this task** (administrator approval).
 6. **Behaviour Engine** (alerts only, never auto-kills): process lineage / command-line shape,
-   and ransomware-style mass modification across folders.
+   and ransomware-style mass modification across folders. Only changes to files that already
+   existed count: writing into files created in the last minute (archive extraction, downloads,
+   build output) and churn in Temp, browser and app caches are ignored, so updaters such as
+   Chrome's do not trip it. Copy-encrypt-delete ransomware still trips the decoys.
 7. **Scheduled quick scan** every 24 h at background CPU/IO priority.
 8. **Archive scanning.** ZIP files (including Office documents, JAR/APK) and ISO/IMG disc images
    are opened in memory and every member is hash-checked and YARA-scanned, following one level of

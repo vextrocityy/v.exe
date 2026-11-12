@@ -1737,6 +1737,12 @@ rule Low_Confidence  { meta: score = 60 strings: $a = "LOW-CONFIDENCE-MARKER" co
         for i in 0..4 {
             std::fs::create_dir_all(docs.join(format!("folder{i}"))).unwrap();
         }
+        // The user's existing documents (ransomware rewrites files that already exist;
+        // writing into brand-new files is an extraction or download and is ignored).
+        let doc = |n: usize| docs.join(format!("folder{}", n % 4)).join(format!("report{n}.txt"));
+        for n in 0..100 {
+            std::fs::write(doc(n), format!("Quarterly report {n}: revenue, costs, notes. ").repeat(150)).unwrap();
+        }
         let engine = Engine::new(paths, Database::open_in_memory().unwrap(), s).unwrap();
         engine.start_realtime();
         std::thread::sleep(std::time::Duration::from_millis(500));
@@ -1748,15 +1754,11 @@ rule Low_Confidence  { meta: score = 60 strings: $a = "LOW-CONFIDENCE-MARKER" co
             .stderr(std::process::Stdio::null())
             .spawn()
             .unwrap();
-        // "Encrypt" 100 documents across 4 folders in a burst.
+        // "Encrypt" the 100 documents across 4 folders in a burst.
         for n in 0..100 {
             let mut data = vec![0u8; 8192];
             getrandom::fill(&mut data).unwrap();
-            std::fs::write(
-                docs.join(format!("folder{}", n % 4)).join(format!("report{n}.txt")),
-                &data,
-            )
-            .unwrap();
+            std::fs::write(doc(n), &data).unwrap();
         }
         let deadline = Instant::now() + std::time::Duration::from_secs(10);
         let mut suspended = false;

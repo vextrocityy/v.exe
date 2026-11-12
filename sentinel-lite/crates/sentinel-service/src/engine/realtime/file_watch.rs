@@ -6,7 +6,7 @@
 //! minifilter is the Phase-2 replacement that can block writes inline.
 
 use super::{ShieldHandle, FILE_SHIELD};
-use crate::engine::heuristics::{self, FileActivity, RansomwareDetector};
+use crate::engine::heuristics::{self, FileActivity, FreshFiles, RansomwareDetector};
 use crate::engine::{targets, Engine};
 use notify::event::{ModifyKind, RenameMode};
 use notify::{EventKind as NEvent, RecursiveMode, Watcher};
@@ -55,6 +55,7 @@ pub fn start(engine: Arc<Engine>) -> Result<ShieldHandle, String> {
             let mut pending: HashMap<PathBuf, Instant> = HashMap::new();
             let mut rename_from: Option<PathBuf> = None;
             let mut ransomware = RansomwareDetector::default();
+            let mut fresh = FreshFiles::default();
 
             while !stop2.load(Ordering::Relaxed) {
                 match rx.recv_timeout(Duration::from_millis(250)) {
@@ -68,12 +69,20 @@ pub fn start(engine: Arc<Engine>) -> Result<ShieldHandle, String> {
                             }
                         }
                         let behavior = engine.settings().behavior_monitor;
+                        let now = Instant::now();
+                        if matches!(ev.kind, NEvent::Create(_)) {
+                            for p in &ev.paths {
+                                fresh.created(p, now);
+                            }
+                        }
                         for (path, activity) in classify(&ev, &mut rename_from) {
                             if engine.is_excluded(&path) {
                                 continue;
                             }
                             if behavior {
-                                if let Some(activity) = activity {
+                                if let Some(activity) =
+                                    activity.filter(|a| heuristics::counts_for_ransomware(&path, *a, &fresh, now))
+                                {
                                     if let Some(alert) = ransomware.record(&path, activity) {
                                         // Rate + spread alone is suspicious; encrypted-looking
                                         // content makes it ransomware: freeze the writer.
