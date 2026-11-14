@@ -12,6 +12,9 @@ pub struct ProcessEntry {
 
 pub use imp::*;
 
+/// Scheduled task that restarts the service if a self-update stops it and dies.
+pub const UPDATE_WATCHDOG_TASK: &str = "VigilUpdateWatchdog";
+
 /// Executables of all running processes (deduplicated), for quick scans.
 pub fn running_process_images() -> Vec<PathBuf> {
     let mut v: Vec<PathBuf> = list_processes().into_iter().filter_map(|p| image_path(p.pid)).collect();
@@ -396,6 +399,39 @@ mod imp {
             .map_err(|e| anyhow::anyhow!("could not start the installer: {e}"))
     }
 
+    /// Safety net for self-updates: a SYSTEM scheduled task that starts the
+    /// service every 5 minutes. The installer stops the service; if it then
+    /// dies or hangs, protection still comes back. The service deletes the task
+    /// as soon as it starts.
+    pub fn arm_update_watchdog() -> anyhow::Result<()> {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let out = std::process::Command::new("schtasks.exe")
+            .args([
+                "/Create", "/F", "/TN", super::UPDATE_WATCHDOG_TASK, "/SC", "MINUTE", "/MO", "5", "/RU", "SYSTEM",
+                "/RL", "HIGHEST", "/TR", "sc.exe start SentinelLite",
+            ])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()?;
+        anyhow::ensure!(
+            out.status.success(),
+            "schtasks: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+        Ok(())
+    }
+
+    pub fn disarm_update_watchdog() {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let _ = std::process::Command::new("schtasks.exe")
+            .args(["/Delete", "/F", "/TN", super::UPDATE_WATCHDOG_TASK])
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+
     /// Start `exe` in the signed-in console user's session (we run as SYSTEM
     /// in session 0). Used to put the dashboard back after an update.
     pub fn launch_in_user_session(exe: &Path, args: &str) -> bool {
@@ -670,6 +706,12 @@ mod imp {
     pub fn launch_in_user_session(_exe: &std::path::Path, _args: &str) -> bool {
         false
     }
+
+    pub fn arm_update_watchdog() -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    pub fn disarm_update_watchdog() {}
 
     pub fn unhide_file(_path: &std::path::Path) {}
 

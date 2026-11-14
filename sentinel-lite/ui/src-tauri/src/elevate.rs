@@ -38,6 +38,11 @@ pub fn run(req: &Request) -> Result<(), String> {
     platform::run_elevated(&service_exe()?, &format!("elevated-request {payload}"))
 }
 
+/// Start the protection service (UAC prompt): `sentinel-service.exe start`.
+pub fn start_service() -> Result<(), String> {
+    platform::run_elevated(&service_exe()?, "start")
+}
+
 #[cfg(windows)]
 mod platform {
     use std::os::windows::ffi::OsStrExt;

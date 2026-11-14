@@ -30,7 +30,9 @@
   nsExec::ExecToLog '"$INSTDIR\sentinel-service.exe" install'
   Pop $0
   StrCmp $0 "0" +2
-    MessageBox MB_ICONEXCLAMATION "The Vigil protection service could not be started (code $0). Protection is NOT active. See %ProgramData%\SentinelLite\logs."
+    ; /SD: silent installs (self-updates run by the SYSTEM service on an invisible
+    ; desktop) must never wait for a click that cannot happen.
+    MessageBox MB_ICONEXCLAMATION /SD IDOK "The Vigil protection service could not be started (code $0). Protection is NOT active. See %ProgramData%\SentinelLite\logs."
   ; Start the dashboard in the tray at every login.
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "Vigil" '"$INSTDIR\vigil.exe" --minimized'
   ; Remove what the old Sentinel-Lite install left behind.
@@ -49,6 +51,7 @@
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL
+  nsExec::ExecToLog 'schtasks /Delete /F /TN VigilUpdateWatchdog'
   nsExec::ExecToLog 'taskkill /IM vigil.exe /F'
   nsExec::ExecToLog '"$INSTDIR\sentinel-service.exe" uninstall'
   DeleteRegValue HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "Vigil"

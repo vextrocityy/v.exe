@@ -237,7 +237,11 @@ pub fn check_and_install(engine: &Engine) -> Result<String> {
         Some(&installer),
         None,
     );
+    if let Err(e) = crate::platform::arm_update_watchdog() {
+        tracing::warn!(error = %format!("{e:#}"), "could not arm the update watchdog");
+    }
     if let Err(e) = crate::platform::run_installer_detached(&installer) {
+        crate::platform::disarm_update_watchdog();
         let _ = std::fs::remove_file(marker(engine));
         return Err(e);
     }

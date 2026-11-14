@@ -173,6 +173,14 @@ fn reveal_path(app: AppHandle, path: String) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// The engine is not running (e.g. an update stopped it and failed): start it.
+#[tauri::command]
+async fn start_service() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(elevate::start_service)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 async fn disable_task(name: String) -> Result<(), String> {
     call_privileged(Request::DisableTask { name }).await.map(|_| ())
@@ -425,6 +433,7 @@ pub fn run() {
             pick_files,
             open_virustotal,
             reveal_path,
+            start_service,
             enable_hardening,
             disable_task,
             get_device_usage,

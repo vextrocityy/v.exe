@@ -84,6 +84,9 @@ pub async fn run(paths: AppPaths, shutdown: impl std::future::Future<Output = ()
         _ => tracing::warn!("running outside Program Files: IPC client verification is DISABLED (dev mode)"),
     }
 
+    // Running again: the self-update safety net (if any) is no longer needed.
+    // Removed before Persistence Watch starts, so it never shows up as a new task.
+    crate::platform::disarm_update_watchdog();
     {
         let e = engine.clone();
         tokio::task::spawn_blocking(move || e.start_realtime()).await?;

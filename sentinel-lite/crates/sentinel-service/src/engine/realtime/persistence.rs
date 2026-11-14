@@ -66,7 +66,9 @@ fn poll(engine: &Engine, baseline: &mut HashMap<String, String>, first_run: &mut
                     _ => continue,
                 };
                 let targets = if let Some(task) = key.strip_prefix(tasks::KEY_PREFIX) {
-                    if tasks::is_routine(task, value) {
+                    if tasks::is_routine(task, value)
+                        || task.trim_start_matches('\\') == crate::platform::UPDATE_WATCHDOG_TASK
+                    {
                         continue;
                     }
                     report_task(engine, task, value, is_new);

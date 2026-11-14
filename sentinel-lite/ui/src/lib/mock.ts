@@ -200,6 +200,7 @@ export const mock = {
           return ["C:\\Users\\alex\\Downloads\\invoice.pdf.exe", "C:\\Users\\alex\\Downloads\\holiday-photos.zip", "C:\\Users\\alex\\Downloads\\setup.exe"];
         case "open_virustotal":
         case "reveal_path":
+        case "start_service":
           return undefined;
         case "check_app_update":
           appUpdate = "Checking for app updates…";

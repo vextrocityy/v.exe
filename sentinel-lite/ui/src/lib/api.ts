@@ -28,6 +28,8 @@ export const api = {
   openVirusTotal: (sha256: string) => invoke<void>("open_virustotal", { sha256 }),
   /** File Explorer with the file selected (or its folder, if the file is gone). */
   revealPath: (path: string) => invoke<void>("reveal_path", { path }),
+  /** Start the protection service (administrator approval). */
+  startService: () => invoke<void>("start_service"),
   enableHardening: (id: string) => invoke<void>("enable_hardening", { id }),
   disableTask: (name: string) => invoke<void>("disable_task", { name }),
   getDeviceUsage: () => invoke<DeviceUse[]>("get_device_usage"),

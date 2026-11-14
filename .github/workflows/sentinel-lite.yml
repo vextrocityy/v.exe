@@ -177,6 +177,7 @@ jobs:
           if (-not ($ev | Where-Object { $_.title -eq "Installing Vigil build $next" })) { throw "updater never started the installer" }
           if ((Get-Service SentinelLite).Status -ne "Running") { throw "service not running after self-update" }
           if ((Get-Process sentinel-service).StartTime -le $before) { throw "service was not restarted by the update" }
+          if (Get-ScheduledTask -TaskName VigilUpdateWatchdog -ErrorAction SilentlyContinue) { throw "update watchdog task left behind after a successful update" }
           "Self-update OK: downloaded, SHA-256 verified, installed silently, service restarted"
           # (The test reuses the same installer, so the restarted service correctly reports it is
           #  still build $build: the mechanism, not a version change, is what is verified here.)
