@@ -32,7 +32,7 @@
   StrCmp $0 "0" +2
     ; /SD: silent installs (self-updates run by the SYSTEM service on an invisible
     ; desktop) must never wait for a click that cannot happen.
-    MessageBox MB_ICONEXCLAMATION /SD IDOK "The Vigil protection service could not be started (code $0). Protection is NOT active. See %ProgramData%\SentinelLite\logs."
+    MessageBox MB_ICONEXCLAMATION "The Vigil protection service could not be started (code $0). Protection is NOT active. See %ProgramData%\SentinelLite\logs." /SD IDOK
   ; Start the dashboard in the tray at every login.
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "Vigil" '"$INSTDIR\vigil.exe" --minimized'
   ; Remove what the old Sentinel-Lite install left behind.
