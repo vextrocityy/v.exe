@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Database, Lock, RefreshCw, ShieldOff } from "lucide-react";
 import { HardeningPanel } from "../components/HardeningPanel";
+import { HomeNetworkCard } from "../components/HomeNetworkCard";
 import { ResourceCard } from "../components/ResourceCard";
 import { ActivityLog } from "../components/ActivityLog";
 import { Panel } from "../components/Panel";
@@ -22,7 +23,7 @@ function signatureHint(status: EngineStatus | null): { text: string; warn: boole
   return { text: `Updated ${timeAgo(status.last_signature_update)}${yara}`, warn: stale };
 }
 
-export function Dashboard({ status, events, refresh, onSeeAll }: { status: EngineStatus | null; events: SecurityEvent[]; refresh: () => Promise<void>; onSeeAll: () => void }) {
+export function Dashboard({ status, events, refresh, onSeeAll, onOpenSettings }: { status: EngineStatus | null; events: SecurityEvent[]; refresh: () => Promise<void>; onSeeAll: () => void; onOpenSettings: () => void }) {
   const [updateError, setUpdateError] = useState<string | null>(null);
   const sig = signatureHint(status);
   const updating = !!status?.update_in_progress;
@@ -88,6 +89,7 @@ export function Dashboard({ status, events, refresh, onSeeAll }: { status: Engin
           </ul>
         </Panel>
       </div>
+      <HomeNetworkCard home={status?.home_network} onSetUp={onOpenSettings} />
       <HardeningPanel checks={status?.hardening ?? []} onChanged={refresh} />
     </div>
   );

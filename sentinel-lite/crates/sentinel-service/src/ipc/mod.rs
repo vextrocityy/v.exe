@@ -315,6 +315,20 @@ async fn dispatch(engine: &Arc<Engine>, req: Request, peer: &Peer) -> Response {
             })
             .await
         }
+        Request::HomeNetworkSuggestions { around } => {
+            blocking(move || match e.home_suggestions(around) {
+                Ok((domains, from, until)) => Response::DomainSuggestions { domains, from, until },
+                Err(m) => Response::error(ErrorCode::BadRequest, m),
+            })
+            .await
+        }
+        Request::HomeNetworkBlock { domains, reason } => {
+            blocking(move || match e.home_block(domains, reason) {
+                Ok((added, failed)) => Response::DomainsBlocked { added, failed },
+                Err(m) => Response::error(ErrorCode::BadRequest, m),
+            })
+            .await
+        }
         Request::GetSettings => Ok(Response::Settings(crate::settings::redacted(&e.settings()))),
         Request::UpdateSettings { settings } => {
             blocking(move || match e.update_settings(settings) {

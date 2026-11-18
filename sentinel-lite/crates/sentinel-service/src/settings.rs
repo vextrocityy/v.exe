@@ -61,6 +61,18 @@ pub fn sanitize(mut s: Settings) -> Settings {
         .map(|u| u.trim().to_string())
         .filter(|u| crate::engine::appupdate::is_allowed_api_url(u));
     s.trusted_apps.truncate(512);
+    s.pihole_url = s.pihole_url.take().and_then(|u| crate::engine::homenet::normalize_url(&u));
+    s.pihole_password = s
+        .pihole_password
+        .take()
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty() && k.len() <= 256 && !k.chars().any(char::is_control));
+    let test = s.dns_test_domain.trim().trim_end_matches('.').to_ascii_lowercase();
+    s.dns_test_domain = if crate::engine::homenet::valid_domain(&test) && !crate::engine::homenet::is_local(&test) {
+        test
+    } else {
+        Settings::default().dns_test_domain
+    };
     clean(&mut s.exclusions);
     clean(&mut s.watch_paths);
     // Excluding a whole drive root is almost certainly a mistake (or an attack).
@@ -77,6 +89,9 @@ pub fn redacted(s: &Settings) -> Settings {
     if out.abusech_auth_key.is_some() {
         out.abusech_auth_key = Some(sentinel_protocol::SECRET_MASK.into());
     }
+    if out.pihole_password.is_some() {
+        out.pihole_password = Some(sentinel_protocol::SECRET_MASK.into());
+    }
     out
 }
 
@@ -84,6 +99,9 @@ pub fn redacted(s: &Settings) -> Settings {
 pub fn merge_secrets(old: &Settings, mut new: Settings) -> Settings {
     if new.abusech_auth_key.as_deref() == Some(sentinel_protocol::SECRET_MASK) {
         new.abusech_auth_key = old.abusech_auth_key.clone();
+    }
+    if new.pihole_password.as_deref() == Some(sentinel_protocol::SECRET_MASK) {
+        new.pihole_password = old.pihole_password.clone();
     }
     new
 }
@@ -98,7 +116,7 @@ pub fn is_allowed_update_url(u: &str) -> bool {
 /// Empty = the change is neutral or strengthening and needs no elevation.
 pub fn weakenings(old: &Settings, new: &Settings) -> Vec<String> {
     let mut out = Vec::new();
-    let flags: [(&str, bool, bool); 22] = [
+    let flags: [(&str, bool, bool); 23] = [
         ("real-time protection", old.realtime_protection, new.realtime_protection),
         ("Process Guard", old.process_monitor, new.process_monitor),
         ("File Shield", old.file_monitor, new.file_monitor),
@@ -129,6 +147,7 @@ pub fn weakenings(old: &Settings, new: &Settings) -> Vec<String> {
         ("automatic app updates", old.auto_update_app, new.auto_update_app),
         ("camera / microphone alerts", old.privacy_monitor, new.privacy_monitor),
         ("rollback snapshots", old.rollback_snapshots, new.rollback_snapshots),
+        ("the DNS tamper alarm", old.dns_guard, new.dns_guard),
     ];
     for (name, before, after) in flags {
         if before && !after {
@@ -156,6 +175,12 @@ pub fn weakenings(old: &Settings, new: &Settings) -> Vec<String> {
     }
     if new.trusted_apps.iter().any(|t| !old.trusted_apps.contains(t)) {
         out.push("trusts additional programs".into());
+    }
+    if old.pihole_url.is_some() && new.pihole_url != old.pihole_url {
+        out.push("changes or removes the Pi-hole server".into());
+    }
+    if old.dns_guard && new.dns_test_domain != old.dns_test_domain {
+        out.push("changes the DNS test domain".into());
     }
     let removed_watch = old.watch_paths.iter().any(|w| !new.watch_paths.contains(w));
     if removed_watch {
@@ -233,6 +258,33 @@ mod tests {
             ..Settings::default()
         });
         assert_eq!(bad.abusech_auth_key, None);
+    }
+
+    #[test]
+    fn pihole_settings_are_sanitised_masked_and_guarded() {
+        let s = sanitize(Settings {
+            pihole_url: Some("http://192.168.88.6/admin/".into()),
+            pihole_password: Some("  app-pw  ".into()),
+            dns_test_domain: "not a domain".into(),
+            ..Settings::default()
+        });
+        assert_eq!(s.pihole_url.as_deref(), Some("http://192.168.88.6"));
+        assert_eq!(s.pihole_password.as_deref(), Some("app-pw"));
+        assert_eq!(s.dns_test_domain, "doubleclick.net");
+        assert_eq!(sanitize(Settings { pihole_url: Some("http://1.2.3.4".into()), ..s.clone() }).pihole_url, None);
+
+        let shown = redacted(&s);
+        assert_eq!(shown.pihole_password.as_deref(), Some(sentinel_protocol::SECRET_MASK));
+        assert_eq!(merge_secrets(&s, sanitize(shown)).pihole_password.as_deref(), Some("app-pw"));
+
+        // Setting up Pi-hole is fine; pointing it elsewhere or silencing the alarm is not.
+        assert!(weakenings(&Settings::default(), &s).is_empty());
+        let moved = Settings { pihole_url: Some("http://192.168.88.7".into()), ..s.clone() };
+        assert_eq!(weakenings(&s, &moved).len(), 1);
+        let silent = Settings { dns_guard: false, ..s.clone() };
+        assert_eq!(weakenings(&s, &silent), vec!["turns off the DNS tamper alarm".to_string()]);
+        let canary = Settings { dns_test_domain: "nonexistent.example".into(), ..s.clone() };
+        assert_eq!(weakenings(&s, &canary).len(), 1);
     }
 
     #[test]

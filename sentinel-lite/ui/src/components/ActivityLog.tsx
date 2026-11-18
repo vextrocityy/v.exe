@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { Activity, AlertOctagon, Ban, Bug, Camera, Check, Copy, DownloadCloud, FileWarning, FolderOpen, History, Info, KeyRound, Lock, Mic, PauseCircle, Play, ScanLine, Settings2, Skull } from "lucide-react";
+import { Activity, AlertOctagon, Ban, Bug, Camera, Check, Copy, DownloadCloud, FileWarning, FolderOpen, History, Info, KeyRound, Lock, Mic, Network, PauseCircle, Play, ScanLine, Settings2, Skull } from "lucide-react";
 import { api } from "../lib/api";
+import { NetworkBlock } from "./NetworkBlock";
 import type { EventKind, SecurityEvent, Severity } from "../lib/types";
 import { shortPath, timeAgo } from "../lib/format";
 
@@ -19,6 +20,7 @@ const KIND_ICON: Record<EventKind, typeof Info> = {
   settings_changed: Settings2,
   signatures_updated: DownloadCloud,
   service_info: Activity,
+  network_alert: Network,
 };
 
 const SEVERITY: Record<Severity, string> = {
@@ -29,7 +31,8 @@ const SEVERITY: Record<Severity, string> = {
   critical: "text-rose-200 bg-rose-500/25 ring-1 ring-rose-500/40",
 };
 
-export function ActivityLog({ events, limit, compact }: { events: SecurityEvent[]; limit?: number; compact?: boolean }) {
+/** `networkBlock`: Pi-hole is connected, so detections offer network-wide blocking. */
+export function ActivityLog({ events, limit, compact, networkBlock }: { events: SecurityEvent[]; limit?: number; compact?: boolean; networkBlock?: boolean }) {
   const rows = limit ? events.slice(0, limit) : events;
   if (rows.length === 0) {
     return <p className="px-5 py-10 text-center text-sm text-slate-500">No activity yet.</p>;
@@ -54,6 +57,7 @@ export function ActivityLog({ events, limit, compact }: { events: SecurityEvent[
               {e.kind === "process_blocked" && e.title.startsWith("Blocked unsigned program") && e.path && <AllowButton path={e.path} />}
               {!compact && e.kind === "persistence_change" && /^(New scheduled task|Scheduled task changed)/.test(e.title) && e.path && <DisableTaskButton name={e.path} />}
               {!compact && e.kind === "threat_detected" && e.title.endsWith("suspicious file left in place") && e.path && <QuarantineButton path={e.path} threat={e.title.replace(/: suspicious file left in place$/, "")} />}
+              {!compact && networkBlock && (e.kind === "threat_detected" || e.kind === "behavior_alert") && <NetworkBlock around={e.timestamp} threat={e.title} />}
             </div>
           </li>
         );

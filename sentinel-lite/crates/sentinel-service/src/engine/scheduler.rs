@@ -16,6 +16,8 @@ const STARTUP_GRACE: Duration = Duration::from_secs(120);
 const UPDATE_RETRY_SECS: i64 = 30 * 60;
 /// First scheduled scan on a fresh install runs this long after the first start.
 const FIRST_SCAN_DELAY_SECS: i64 = 15 * 60;
+/// How often Pi-hole stats and this PC's DNS are re-checked.
+const HOME_CHECK_SECS: i64 = 5 * 60;
 
 /// Pure decision logic, unit-tested below.
 pub fn update_due(now: i64, last_success: i64, last_attempt: i64, interval_hours: u64) -> bool {
@@ -90,6 +92,11 @@ fn tick(engine: &Arc<Engine>) {
             Ok(snap) => tracing::info!(id = %snap.id, "rollback snapshot taken"),
             Err(e) => tracing::warn!(error = %e, "rollback snapshot failed"),
         }
+    }
+
+    if s.pihole_url.is_some() && now - counter("last_home_check") >= HOME_CHECK_SECS {
+        engine.db.set_counter("last_home_check", now);
+        engine.check_home_network();
     }
 
     if s.scheduled_scan

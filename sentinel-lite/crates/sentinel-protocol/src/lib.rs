@@ -12,7 +12,7 @@ pub const PIPE_NAME: &str = r"\\.\pipe\sentinel_lite_ipc";
 /// Hard upper bound on one frame; protects the service from memory exhaustion.
 pub const MAX_FRAME_BYTES: u32 = 4 * 1024 * 1024;
 /// Bumped on any incompatible change; the UI refuses to talk to a different version.
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 /// Placeholder sent instead of stored secrets; sending it back means "unchanged".
 pub const SECRET_MASK: &str = "********";
 
@@ -121,6 +121,46 @@ pub struct EngineStatus {
     pub last_snapshot: Option<i64>,
     #[serde(default)]
     pub snapshot_error: Option<String>,
+    /// Pi-hole on the home network, as of the last background check.
+    #[serde(default)]
+    pub home_network: HomeNetworkStatus,
+}
+
+/// State of the home network's Pi-hole and of this PC's DNS.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HomeNetworkStatus {
+    /// A Pi-hole address is set in Settings.
+    pub configured: bool,
+    /// The Pi-hole API answered at the last check.
+    pub reachable: bool,
+    /// Why the API could not be used (wrong password, offline, ...).
+    pub error: Option<String>,
+    /// This PC's DNS goes through Pi-hole: the test domain came back blocked.
+    /// `None` = could not tell (offline, or the check is off).
+    pub dns_filtered: Option<bool>,
+    pub dns_detail: Option<String>,
+    /// Network-wide totals for today, from Pi-hole.
+    pub queries_today: Option<u64>,
+    pub blocked_today: Option<u64>,
+    pub percent_blocked: Option<f64>,
+    pub domains_on_lists: Option<u64>,
+    /// Unix time of the last check.
+    pub last_check: Option<i64>,
+}
+
+/// A domain this PC looked up around the time of a detection, offered for
+/// blocking on the whole home network.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DomainSuggestion {
+    pub domain: String,
+    pub queries: u32,
+    pub first_seen: i64,
+    pub last_seen: i64,
+    /// Pi-hole already blocks it.
+    pub already_blocked: bool,
+    /// Why it is probably harmless (a big service, looked up often on this network).
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -253,6 +293,8 @@ pub enum EventKind {
     SettingsChanged,
     SignaturesUpdated,
     ServiceInfo,
+    /// Home network (Pi-hole / DNS) alerts and actions.
+    NetworkAlert,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -348,6 +390,16 @@ pub struct Settings {
     /// Where releases are looked up. `None` = this project's GitHub releases.
     /// Only GitHub API URLs (or a loopback test server) are accepted.
     pub app_update_api: Option<String>,
+    /// Pi-hole on the home network, e.g. `http://192.168.88.6`. Only private,
+    /// Tailscale or local-name addresses are accepted.
+    pub pihole_url: Option<String>,
+    /// Pi-hole app password (Settings > Web interface / API > app password).
+    /// Masked with [`SECRET_MASK`] when sent to clients.
+    pub pihole_password: Option<String>,
+    /// Alert when this PC's DNS stops going through Pi-hole.
+    pub dns_guard: bool,
+    /// A domain Pi-hole blocks, used to test this PC's DNS.
+    pub dns_test_domain: String,
 }
 
 impl Default for Settings {
@@ -391,6 +443,10 @@ impl Default for Settings {
             trusted_apps: Vec::new(),
             auto_update_app: true,
             app_update_api: None,
+            pihole_url: None,
+            pihole_password: None,
+            dns_guard: true,
+            dns_test_domain: "doubleclick.net".into(),
         }
     }
 }
@@ -401,6 +457,8 @@ impl Default for Settings {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
+// One message per IPC frame, never stored in bulk: boxing the big variants buys nothing.
+#[allow(clippy::large_enum_variant)]
 pub enum Request {
     Auth {
         token: String,
@@ -477,6 +535,15 @@ pub enum Request {
     UpdateSettings {
         settings: Settings,
     },
+    /// Domains this PC looked up near `around` (unix time of a detection), from Pi-hole.
+    HomeNetworkSuggestions {
+        around: i64,
+    },
+    /// Block these exact domains for every device on the home network (Pi-hole deny list).
+    HomeNetworkBlock {
+        domains: Vec<String>,
+        reason: Option<String>,
+    },
     /// Turn the connection into a push stream of `Response::Event`.
     Subscribe,
 }
@@ -490,6 +557,8 @@ pub enum ProcessActionKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
+// One message per IPC frame, never stored in bulk: boxing the big variants buys nothing.
+#[allow(clippy::large_enum_variant)]
 pub enum Response {
     AuthOk { protocol_version: u32 },
     Status(EngineStatus),
@@ -503,6 +572,8 @@ pub enum Response {
     Snapshots(Vec<Snapshot>),
     RollbackPreview { changes: Vec<FileChange>, truncated: bool },
     RollbackDone { restored: u32, failed: Vec<String>, backup_dir: Option<String> },
+    DomainSuggestions { domains: Vec<DomainSuggestion>, from: i64, until: i64 },
+    DomainsBlocked { added: Vec<String>, failed: Vec<String> },
     Ok,
     Error { code: ErrorCode, message: String },
 }

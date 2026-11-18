@@ -5,6 +5,7 @@ pub mod appupdate;
 pub mod archive;
 pub mod hasher;
 pub mod heuristics;
+pub mod homenet;
 pub mod inspect;
 pub mod netguard;
 pub mod quarantine;
@@ -98,6 +99,8 @@ pub struct Engine {
     snapshot_running: AtomicBool,
     /// A rollback restore is writing files: entropy alerts would be our own doing.
     restore_running: AtomicBool,
+    /// Pi-hole client (kept so its login session is reused) and the last check's result.
+    home: Mutex<(Option<Arc<homenet::Pihole>>, HomeNetworkStatus)>,
     started: Instant,
 }
 
@@ -139,6 +142,7 @@ impl Engine {
             snapshot_error: Mutex::new(None),
             snapshot_running: AtomicBool::new(false),
             restore_running: AtomicBool::new(false),
+            home: Mutex::new((None, HomeNetworkStatus::default())),
             started: Instant::now(),
         }))
     }
@@ -151,7 +155,8 @@ impl Engine {
 
     /// Validate, persist and apply new settings (restarts the real-time shields).
     pub fn update_settings(self: &Arc<Self>, new: Settings) -> Result<Settings> {
-        let new = settings::merge_secrets(&self.settings(), settings::sanitize(new));
+        let old = self.settings();
+        let new = settings::merge_secrets(&old, settings::sanitize(new));
         settings::save(&self.paths.settings, &new)?;
         *self.settings.write().unwrap_or_else(|e| e.into_inner()) = new.clone();
         self.emit(
@@ -163,6 +168,14 @@ impl Engine {
             None,
         );
         self.restart_realtime();
+        let home_changed = (&old.pihole_url, &old.pihole_password, old.dns_guard, &old.dns_test_domain)
+            != (&new.pihole_url, &new.pihole_password, new.dns_guard, &new.dns_test_domain);
+        if home_changed {
+            let e = self.clone();
+            let _ = std::thread::Builder::new()
+                .name("home-network-check".into())
+                .spawn(move || crate::util::contain("home network check", || e.check_home_network()));
+        }
         Ok(new)
     }
 
@@ -1466,6 +1479,10 @@ impl Engine {
         if signature_count == 0 {
             reasons.push("No threat signatures loaded".to_string());
         }
+        let home_network = lock(&self.home).1.clone();
+        if settings.dns_guard && home_network.configured && home_network.dns_filtered == Some(false) {
+            reasons.push("DNS is not going through Pi-hole".to_string());
+        }
         let state = if self.unresolved_threats.load(Ordering::Relaxed) > 0 {
             ProtectionState::ThreatDetected
         } else if reasons.is_empty() {
@@ -1499,7 +1516,160 @@ impl Engine {
             devices_in_use: lock(&self.devices_in_use).clone(),
             last_snapshot: self.last_snapshot(),
             snapshot_error: lock(&self.snapshot_error).clone(),
+            home_network,
         }
+    }
+
+    // ----- home network (Pi-hole) ------------------------------------------------------
+
+    /// The Pi-hole client for the current settings (rebuilt when they change).
+    fn pihole(&self) -> Option<Arc<homenet::Pihole>> {
+        let s = self.settings();
+        let url = s.pihole_url?;
+        let mut home = lock(&self.home);
+        match &home.0 {
+            Some(p) if p.same_config(&url, &s.pihole_password) => Some(p.clone()),
+            _ => {
+                let p = Arc::new(homenet::Pihole::new(url, s.pihole_password));
+                home.0 = Some(p.clone());
+                Some(p)
+            }
+        }
+    }
+
+    /// Refresh Pi-hole stats and test this PC's DNS; alert when DNS stops
+    /// going through Pi-hole. Runs every few minutes from the scheduler.
+    pub fn check_home_network(&self) {
+        let s = self.settings();
+        let Some(ph) = self.pihole() else {
+            lock(&self.home).1 = HomeNetworkStatus::default();
+            return;
+        };
+        let mut st = HomeNetworkStatus {
+            configured: true,
+            last_check: Some(now_unix()),
+            ..Default::default()
+        };
+        match ph.summary() {
+            Ok(sum) => {
+                st.reachable = true;
+                st.queries_today = sum.total;
+                st.blocked_today = sum.blocked;
+                st.percent_blocked = sum.percent;
+                st.domains_on_lists = sum.gravity;
+            }
+            Err(e) => st.error = Some(format!("{e:#}")),
+        }
+        if s.dns_guard {
+            let (filtered, detail) = match homenet::check_dns(&s.dns_test_domain) {
+                homenet::DnsVerdict::Filtered(d) => (Some(true), d),
+                homenet::DnsVerdict::Unfiltered(d) => (Some(false), d),
+                homenet::DnsVerdict::Unknown(d) => (None, d),
+            };
+            st.dns_filtered = filtered;
+            st.dns_detail = Some(detail.clone());
+            // The last known state survives restarts, so a reboot does not repeat the alert.
+            let previous = self.db.meta("dns_filtered");
+            if let Some(now) = filtered {
+                let now_s = if now { "1" } else { "0" };
+                if previous.as_deref() != Some(now_s) {
+                    self.db.set_meta("dns_filtered", Some(now_s));
+                    if !now {
+                        self.emit(
+                            EventKind::NetworkAlert,
+                            Severity::High,
+                            "DNS is bypassing Pi-hole",
+                            Some(format!(
+                                "{detail}. Malware sometimes changes DNS settings to get around blocking. Check this PC's \
+                                 network adapter DNS settings (they should point at your Pi-hole or be automatic), \
+                                 a VPN app, or browser \"secure DNS\" settings."
+                            )),
+                            None,
+                            None,
+                        );
+                    } else if previous.is_some() {
+                        self.emit(
+                            EventKind::NetworkAlert,
+                            Severity::Info,
+                            "DNS goes through Pi-hole again",
+                            Some(detail),
+                            None,
+                            None,
+                        );
+                    }
+                }
+            }
+        }
+        lock(&self.home).1 = st;
+    }
+
+    /// Domains this PC looked up around `around` (a detection's time), from Pi-hole's log.
+    pub fn home_suggestions(&self, around: i64) -> Result<(Vec<DomainSuggestion>, i64, i64), String> {
+        let now = now_unix();
+        if around > now + 3600 || around < now - 30 * 86_400 {
+            return Err("Pi-hole only keeps recent history: pick a detection from the last 30 days".into());
+        }
+        let ph = self.pihole().ok_or("Connect your Pi-hole in Settings > Home network first")?;
+        let ips = homenet::local_ips(&ph.base);
+        if ips.is_empty() {
+            return Err("Could not work out this PC's network address".into());
+        }
+        let from = around - homenet::WINDOW_BEFORE_SECS;
+        let until = (around + homenet::WINDOW_AFTER_SECS).min(now);
+        let mut queries = Vec::new();
+        for ip in &ips {
+            let q = ph.queries(from, until, ip).map_err(|e| format!("{e:#}"))?;
+            // Older Pi-hole versions may ignore the client filter: apply it here too.
+            queries.extend(q.into_iter().filter(|q| ips.contains(&q.client) && (from..=until).contains(&q.time)));
+        }
+        let frequent = ph.top_domains(100).unwrap_or_default();
+        Ok((homenet::build_suggestions(&queries, &frequent), from, until))
+    }
+
+    /// Block exact domains for every device on the home network.
+    pub fn home_block(&self, domains: Vec<String>, reason: Option<String>) -> Result<(Vec<String>, Vec<String>), String> {
+        if domains.is_empty() || domains.len() > homenet::MAX_BLOCK {
+            return Err(format!("Pick between 1 and {} domains", homenet::MAX_BLOCK));
+        }
+        let ph = self.pihole().ok_or("Connect your Pi-hole in Settings > Home network first")?;
+        let host = std::env::var("COMPUTERNAME")
+            .or_else(|_| std::env::var("HOSTNAME"))
+            .unwrap_or_else(|_| "this PC".into());
+        let why: String = reason
+            .unwrap_or_default()
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(120)
+            .collect();
+        let comment = if why.trim().is_empty() {
+            format!("Blocked by Vigil on {host}")
+        } else {
+            format!("Blocked by Vigil on {host}: {}", why.trim())
+        };
+        let (mut added, mut failed) = (Vec::new(), Vec::new());
+        for d in domains {
+            match homenet::blockable(&d) {
+                Ok(d) => match ph.deny(&d, &comment) {
+                    Ok(()) => added.push(d),
+                    Err(e) => failed.push(format!("{d}: {e:#}")),
+                },
+                Err(why) => failed.push(why),
+            }
+        }
+        if !added.is_empty() {
+            self.emit(
+                EventKind::NetworkAlert,
+                Severity::Info,
+                format!("Blocked {} domain(s) on the home network", added.len()),
+                Some(format!(
+                    "{}. Every device using Pi-hole now gets no answer for them. Undo in Pi-hole under Domains.",
+                    added.join(", ")
+                )),
+                None,
+                None,
+            );
+        }
+        Ok((added, failed))
     }
 }
 
@@ -1634,6 +1804,80 @@ rule Low_Confidence  { meta: score = 60 strings: $a = "LOW-CONFIDENCE-MARKER" co
             .db
             .upsert_signatures("test@1", [(h.as_str(), name, Severity::High)])
             .unwrap();
+    }
+
+    /// Engine ↔ Pi-hole end to end against a fake Pi-hole: stats, suggestions
+    /// for a detection, and network-wide blocking with its guard rails.
+    #[test]
+    fn home_network_stats_suggestions_and_blocking() {
+        let denied = Arc::new(Mutex::new(Vec::<String>::new()));
+        let d2 = denied.clone();
+        let base = homenet::tests::fake_pihole(move |line, body| {
+            let path = line.split(' ').nth(1).unwrap_or("");
+            let param = |k: &str| {
+                path.split(['?', '&'])
+                    .find_map(|kv| kv.strip_prefix(&format!("{k}=")))
+                    .unwrap_or("")
+                    .to_string()
+            };
+            if line.starts_with("POST /api/auth") {
+                (200, r#"{"session":{"valid":true,"sid":"s1","validity":1800}}"#.into())
+            } else if path.starts_with("/api/stats/summary") {
+                (200, r#"{"queries":{"total":500,"blocked":90,"percent_blocked":18.0},"gravity":{"domains_being_blocked":123}}"#.into())
+            } else if path.starts_with("/api/queries") {
+                let (from, until, ip) = (param("from"), param("until"), param("client_ip"));
+                let from: i64 = from.parse().unwrap();
+                let until: i64 = until.parse().unwrap();
+                let q = |t: i64, d: &str, client: &str| {
+                    format!(r#"{{"time":{t}.2,"domain":"{d}","client":{{"ip":"{client}"}},"status":"FORWARDED"}}"#)
+                };
+                let rows = [
+                    q(from + 60, "evil-c2.example", &ip),
+                    q(from + 70, "settings.data.microsoft.com", &ip),
+                    q(until + 500, "outside-window.example", &ip),
+                    q(from + 80, "someone-elses-pc.example", "192.0.2.99"),
+                ];
+                (200, format!(r#"{{"queries":[{}]}}"#, rows.join(",")))
+            } else if path.starts_with("/api/stats/top_domains") {
+                (200, r#"{"domains":[]}"#.into())
+            } else if line.starts_with("POST /api/domains/deny/exact") {
+                d2.lock().unwrap().push(body.to_string());
+                (201, r#"{"processed":{"success":[{"item":"x"}],"errors":[]}}"#.into())
+            } else {
+                (404, r#"{"error":{"message":"no route"}}"#.into())
+            }
+        });
+
+        let (_dir, engine) = engine_with_rules(RULES);
+        {
+            let mut s = engine.settings.write().unwrap();
+            s.pihole_url = Some(base);
+            s.pihole_password = Some("pw".into());
+            s.dns_guard = false; // no real DNS in tests
+        }
+        engine.check_home_network();
+        let home = engine.status().home_network;
+        assert!(home.configured && home.reachable, "{home:?}");
+        assert_eq!((home.queries_today, home.domains_on_lists), (Some(500), Some(123)));
+
+        let now = now_unix();
+        let (domains, from, until) = engine.home_suggestions(now - 60).unwrap();
+        assert!(from < until && until <= now);
+        let names: Vec<&str> = domains.iter().map(|d| d.domain.as_str()).collect();
+        assert_eq!(names, vec!["evil-c2.example", "settings.data.microsoft.com"], "window and client filters");
+        assert!(engine.home_suggestions(now - 90 * 86_400).is_err(), "too old");
+
+        let (added, failed) = engine
+            .home_block(vec!["evil-c2.example".into(), "microsoft.com".into()], Some("Trojan.Test detected".into()))
+            .unwrap();
+        assert_eq!(added, vec!["evil-c2.example".to_string()]);
+        assert_eq!(failed.len(), 1, "the root of a big service is refused");
+        let bodies = denied.lock().unwrap().clone();
+        assert_eq!(bodies.len(), 1);
+        assert!(bodies[0].contains("evil-c2.example") && bodies[0].contains("Trojan.Test detected"), "{bodies:?}");
+        let titles: Vec<String> = engine.db.recent_events(5, None).unwrap().into_iter().map(|e| e.title).collect();
+        assert!(titles.iter().any(|t| t == "Blocked 1 domain(s) on the home network"), "{titles:?}");
+        assert!(engine.home_block(Vec::new(), None).is_err());
     }
 
     #[test]

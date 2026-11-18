@@ -35,9 +35,9 @@ export default function App() {
         </header>
         {error && <ServiceError error={error} onStarted={refresh} />}
         <div className="px-8 pb-8">
-          {page === "dashboard" && <Dashboard status={status} events={events} refresh={refresh} onSeeAll={() => setPage("activity")} />}
+          {page === "dashboard" && <Dashboard status={status} events={events} refresh={refresh} onSeeAll={() => setPage("activity")} onOpenSettings={() => setPage("settings")} />}
           {page === "filecheck" && <FileCheckPage />}
-          {page === "activity" && <ActivityPage events={events} />}
+          {page === "activity" && <ActivityPage events={events} networkBlock={!!status?.home_network?.configured} />}
           {page === "privacy" && <PrivacyPage status={status} />}
           {page === "recovery" && <RecoveryPage status={status} events={events} refresh={refresh} />}
           {page === "quarantine" && <QuarantinePage onChanged={refresh} />}

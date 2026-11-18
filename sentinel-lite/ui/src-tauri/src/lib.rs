@@ -235,6 +235,37 @@ async fn rollback_restore(snapshot_id: String, paths: Vec<String>) -> Result<(),
         .map(|_| ())
 }
 
+#[derive(serde::Serialize)]
+struct Suggestions {
+    domains: Vec<DomainSuggestion>,
+    from: i64,
+    until: i64,
+}
+
+/// Domains this PC looked up around a detection, from the home network's Pi-hole.
+#[tauri::command]
+async fn home_network_suggestions(around: i64) -> Result<Suggestions, String> {
+    match call(Request::HomeNetworkSuggestions { around }).await? {
+        Response::DomainSuggestions { domains, from, until } => Ok(Suggestions { domains, from, until }),
+        r => Err(unexpected(r)),
+    }
+}
+
+#[derive(serde::Serialize)]
+struct Blocked {
+    added: Vec<String>,
+    failed: Vec<String>,
+}
+
+/// Block domains for every device on the home network (Pi-hole deny list).
+#[tauri::command]
+async fn home_network_block(domains: Vec<String>, reason: Option<String>) -> Result<Blocked, String> {
+    match call(Request::HomeNetworkBlock { domains, reason }).await? {
+        Response::DomainsBlocked { added, failed } => Ok(Blocked { added, failed }),
+        r => Err(unexpected(r)),
+    }
+}
+
 #[tauri::command]
 async fn get_events(limit: Option<u32>, before_id: Option<i64>) -> Result<Vec<SecurityEvent>, String> {
     match call(Request::GetEvents {
@@ -303,6 +334,8 @@ fn maybe_notify(app: &AppHandle, ev: &SecurityEvent) {
         // Camera / microphone switched on (switching off is Info: no toast).
         EventKind::DeviceAccess => ev.severity >= Severity::Low,
         EventKind::PersistenceChange => ev.severity >= Severity::High,
+        // DNS stopped going through Pi-hole.
+        EventKind::NetworkAlert => ev.severity >= Severity::High,
         _ => false,
     };
     if !important {
@@ -421,6 +454,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_status,
+            home_network_suggestions,
+            home_network_block,
             start_scan,
             cancel_scan,
             acknowledge_threats,

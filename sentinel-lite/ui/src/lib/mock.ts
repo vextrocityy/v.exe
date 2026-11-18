@@ -44,6 +44,10 @@ const settings: Settings = {
   rollback_interval_hours: 4,
   auto_update_app: true,
   app_update_api: null,
+  pihole_url: "http://192.168.88.6",
+  pihole_password: "********",
+  dns_guard: true,
+  dns_test_domain: "doubleclick.net",
   trusted_apps: [{ path: "C:\\Users\\alex\\Downloads\\tools\\putty.exe", sha256: "9f".repeat(32) }],
 };
 let lsaOn = false;
@@ -135,6 +139,9 @@ function status(): EngineStatus {
     devices_in_use: settings.privacy_monitor ? devices.filter((d) => d.in_use) : [],
     last_snapshot: snapshots.filter((s) => s.ours)[0]?.created_at ?? null,
     snapshot_error: null,
+    home_network: settings.pihole_url
+      ? { configured: true, reachable: true, error: null, dns_filtered: settings.dns_guard ? true : null, dns_detail: settings.dns_guard ? "doubleclick.net is blocked for this PC, so its DNS goes through Pi-hole" : null, queries_today: 48213, blocked_today: 9120, percent_blocked: 18.9, domains_on_lists: 412345, last_check: now() - 140 }
+      : { configured: false, reachable: false, error: null, dns_filtered: null, dns_detail: null, queries_today: null, blocked_today: null, percent_blocked: null, domains_on_lists: null, last_check: null },
     hardening: [
       { id: "lsa_protection", name: "LSA protection (credential theft)", ok: lsaOn, detail: lsaOn ? "LSASS runs as a protected process." : "Off. Turning it on stops tools like Mimikatz from reading passwords out of LSASS memory. Takes effect after a restart.", fixable: !lsaOn },
       { id: "firewall", name: "Windows Firewall", ok: true, detail: "On for all network profiles.", fixable: false },
@@ -243,6 +250,25 @@ export const mock = {
           quarantine = quarantine.filter((q) => q.id !== args.id);
           push({ kind: "service_info", severity: cmd === "restore_quarantine" ? "medium" : "info", title: cmd === "restore_quarantine" ? "File restored from quarantine" : "Quarantined file permanently deleted", detail: null, path: null, pid: null });
           return undefined;
+        case "home_network_suggestions": {
+          const t = args.around as number;
+          return {
+            from: t - 900,
+            until: t + 300,
+            domains: [
+              { domain: "cdn-update-check.xyz", queries: 6, first_seen: t - 40, last_seen: t + 12, already_blocked: false, note: null },
+              { domain: "api.telegram-relay.top", queries: 2, first_seen: t - 8, last_seen: t - 5, already_blocked: false, note: null },
+              { domain: "ads.tracker-network.example", queries: 3, first_seen: t - 600, last_seen: t - 30, already_blocked: true, note: null },
+              { domain: "settings-win.data.microsoft.com", queries: 4, first_seen: t - 800, last_seen: t + 100, already_blocked: false, note: "Part of microsoft.com, a widely used service; usually safe" },
+              { domain: "www.netflix.com", queries: 9, first_seen: t - 850, last_seen: t + 200, already_blocked: false, note: "Looked up often on your network; usually safe" },
+            ],
+          };
+        }
+        case "home_network_block": {
+          const added = args.domains as string[];
+          push({ kind: "network_alert", severity: "info", title: `Blocked ${added.length} domain(s) on the home network`, detail: `${added.join(", ")}. Every device using Pi-hole now gets no answer for them. Undo in Pi-hole under Domains.`, path: null, pid: null });
+          return { added, failed: [] };
+        }
         case "get_settings": return { ...settings };
         case "update_settings": Object.assign(settings, args.settings); return { ...settings };
         default: throw new Error(`mock: unknown command ${cmd}`);

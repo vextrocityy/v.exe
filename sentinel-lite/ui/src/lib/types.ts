@@ -53,6 +53,42 @@ export interface EngineStatus {
   devices_in_use: DeviceUse[];
   last_snapshot: number | null;
   snapshot_error: string | null;
+  home_network: HomeNetworkStatus;
+}
+
+/** Pi-hole on the home network, as of the engine's last background check. */
+export interface HomeNetworkStatus {
+  configured: boolean;
+  reachable: boolean;
+  error: string | null;
+  /** true = this PC's DNS goes through Pi-hole; false = bypassed; null = unknown. */
+  dns_filtered: boolean | null;
+  dns_detail: string | null;
+  queries_today: number | null;
+  blocked_today: number | null;
+  percent_blocked: number | null;
+  domains_on_lists: number | null;
+  last_check: number | null;
+}
+
+export interface DomainSuggestion {
+  domain: string;
+  queries: number;
+  first_seen: number;
+  last_seen: number;
+  already_blocked: boolean;
+  note: string | null;
+}
+
+export interface DomainSuggestions {
+  domains: DomainSuggestion[];
+  from: number;
+  until: number;
+}
+
+export interface DomainsBlocked {
+  added: string[];
+  failed: string[];
 }
 
 export type Device = "camera" | "microphone";
@@ -117,7 +153,8 @@ export type EventKind =
   | "scan_error"
   | "settings_changed"
   | "signatures_updated"
-  | "service_info";
+  | "service_info"
+  | "network_alert";
 
 export interface SecurityEvent {
   id: number;
@@ -179,6 +216,12 @@ export interface Settings {
   trusted_apps: TrustedApp[];
   auto_update_app: boolean;
   app_update_api: string | null;
+  /** Pi-hole address, e.g. http://192.168.88.6 */
+  pihole_url: string | null;
+  /** Masked as "********" by the service; send it back unchanged to keep it. */
+  pihole_password: string | null;
+  dns_guard: boolean;
+  dns_test_domain: string;
 }
 
 export type ProcessAction = "resume" | "terminate";

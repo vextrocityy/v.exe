@@ -205,6 +205,40 @@ export function SettingsPage() {
         </div>
       </Panel>
 
+      <Panel title="Home network (Pi-hole)">
+        <div className="border-b border-slate-800/70 px-5 py-4">
+          <label htmlFor="pihole-url" className="text-sm text-slate-200">Pi-hole address</label>
+          <p className="text-xs text-slate-500">The address you open Pi-hole's dashboard at, without /admin. Only home-network and Tailscale addresses are accepted.</p>
+          <input
+            id="pihole-url"
+            spellCheck={false}
+            value={s.pihole_url ?? ""}
+            onChange={(e) => set("pihole_url", e.target.value.trim() === "" ? null : e.target.value.trim())}
+            placeholder="http://192.168.1.10"
+            className="mt-2 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-sm text-slate-200 placeholder:text-slate-600 focus:border-cyan-500 focus:outline-none"
+          />
+        </div>
+        <div className="border-b border-slate-800/70 px-5 py-4">
+          <label htmlFor="pihole-password" className="text-sm text-slate-200">Pi-hole app password</label>
+          <p className="text-xs text-slate-500">
+            In Pi-hole: Settings, switch to Expert, Web interface / API, Configure app password. An app password is safer than your login password. Stored by the service and never shown again.
+          </p>
+          <input
+            id="pihole-password"
+            type="password"
+            autoComplete="off"
+            spellCheck={false}
+            value={s.pihole_password ?? ""}
+            onChange={(e) => set("pihole_password", e.target.value.trim() === "" ? null : e.target.value.trim())}
+            placeholder={s.pihole_url ? "Paste the app password" : "Set the address first"}
+            className="mt-2 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-sm text-slate-200 placeholder:text-slate-600 focus:border-cyan-500 focus:outline-none"
+          />
+        </div>
+        <Row label="DNS tamper alarm" hint={`Every 5 minutes, check that ${s.dns_test_domain} (blocked by Pi-hole) is blocked for this PC. If it resolves, something is sending DNS around Pi-hole: malware often changes DNS settings to dodge blocking.`}>
+          <Toggle label="DNS tamper alarm" checked={s.dns_guard} disabled={!s.pihole_url} onChange={(v) => set("dns_guard", v)} />
+        </Row>
+      </Panel>
+
       <Panel title="Ransomware, archives & clean-up">
         <Row label="Scan inside archives" hint="Look inside ZIP files (including Office documents) and ISO/IMG disk images. A malicious file inside quarantines the whole archive.">
           <Toggle label="Scan inside archives" checked={s.archive_scanning} onChange={(v) => set("archive_scanning", v)} />

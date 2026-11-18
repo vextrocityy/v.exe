@@ -7,11 +7,12 @@ const FILTERS = {
   all: () => true,
   threats: (e: SecurityEvent) => ["threat_detected", "threat_quarantined", "process_blocked", "process_suspended", "behavior_alert"].includes(e.kind),
   system: (e: SecurityEvent) => ["persistence_change", "settings_changed", "signatures_updated", "service_info", "recovery"].includes(e.kind),
+  network: (e: SecurityEvent) => e.kind === "network_alert",
   privacy: (e: SecurityEvent) => e.kind === "device_access",
   scans: (e: SecurityEvent) => e.kind.startsWith("scan_"),
 } as const;
 
-export function ActivityPage({ events }: { events: SecurityEvent[] }) {
+export function ActivityPage({ events, networkBlock }: { events: SecurityEvent[]; networkBlock?: boolean }) {
   const [filter, setFilter] = useState<keyof typeof FILTERS>("all");
   const rows = useMemo(() => events.filter(FILTERS[filter]), [events, filter]);
   return (
@@ -27,7 +28,7 @@ export function ActivityPage({ events }: { events: SecurityEvent[] }) {
         </div>
       }
     >
-      <ActivityLog events={rows} />
+      <ActivityLog events={rows} networkBlock={networkBlock} />
     </Panel>
   );
 }

@@ -2,7 +2,7 @@
 // Outside Tauri (plain `npm run dev` in a browser) it falls back to an
 // in-memory mock engine so the UI can be developed without the service.
 
-import type { DeviceUse, EngineStatus, Inspection, ProcessAction, QuarantineItem, RollbackPreview, ScanKind, SecurityEvent, Settings, Snapshot } from "./types";
+import type { DeviceUse, DomainsBlocked, DomainSuggestions, EngineStatus, Inspection, ProcessAction, QuarantineItem, RollbackPreview, ScanKind, SecurityEvent, Settings, Snapshot } from "./types";
 import { mock } from "./mock";
 
 export const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -42,6 +42,10 @@ export const api = {
   listQuarantine: () => invoke<QuarantineItem[]>("list_quarantine"),
   restoreQuarantine: (id: string) => invoke<void>("restore_quarantine", { id }),
   deleteQuarantine: (id: string) => invoke<void>("delete_quarantine", { id }),
+  /** Domains this PC looked up around a detection (unix time), from Pi-hole. */
+  homeNetworkSuggestions: (around: number) => invoke<DomainSuggestions>("home_network_suggestions", { around }),
+  /** Block domains for every device on the home network. */
+  homeNetworkBlock: (domains: string[], reason?: string) => invoke<DomainsBlocked>("home_network_block", { domains, reason }),
   getSettings: () => invoke<Settings>("get_settings"),
   updateSettings: (settings: Settings) => invoke<Settings>("update_settings", { settings }),
 };

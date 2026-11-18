@@ -143,7 +143,7 @@ fn is_loopback(url: &str) -> bool {
 /// only partly populated), checks revocation, and trusts roots installed by
 /// security software or IT. Falls back to Mozilla's root list if the platform
 /// verifier cannot start.
-fn tls_config() -> Arc<rustls::ClientConfig> {
+pub(crate) fn tls_config() -> Arc<rustls::ClientConfig> {
     static CONFIG: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
     CONFIG
         .get_or_init(|| {
