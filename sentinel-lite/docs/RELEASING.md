@@ -88,3 +88,14 @@ the engine also matters for the IPC trust model and for future ELAM / PPL work.
 - [ ] CI green: engine tests + Windows smoke test + installer job
 - [ ] Installer and binaries code-signed
 - [ ] Upgrade tested over the previous release (settings, quarantine and history preserved)
+
+## Gated releases
+
+Every push that passes CI publishes a **pre-release** named `Vigil build N (test)`. Installed
+copies never update to a pre-release: the updater refuses them and GitHub's `releases/latest`
+skips them. To try a test build, download its installer from the Releases page.
+
+To release build N to every install: GitHub > Actions > **sentinel-lite** > *Run workflow* >
+`promote_build` = N. The job checks that the build exists with its installer and checksums and is
+newer than the current release, then marks it as the latest release. Installs pick it up within
+6 hours (or at once with Settings > Check now).

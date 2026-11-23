@@ -5,7 +5,20 @@ on:
     paths: ["sentinel-lite/**", ".github/workflows/sentinel-lite.yml"]
   pull_request:
     paths: ["sentinel-lite/**", ".github/workflows/sentinel-lite.yml"]
+  # Run by hand with a build number to release that (already tested) build to
+  # everyone; with the field empty it just builds and tests like a push.
   workflow_dispatch:
+    inputs:
+      promote_build:
+        description: "Build number to release to all installs (e.g. 33). Leave empty to only build a test build."
+        required: false
+        default: ""
+
+# Releases are gated. Every push builds, tests and publishes a PRE-RELEASE
+# ("Vigil build N (test)"): downloadable from the Releases page, but installs
+# never update to it (the updater and /releases/latest ignore pre-releases).
+# A build reaches everyone only when someone promotes it: Actions > sentinel-lite >
+# Run workflow > promote_build = N.
 
 defaults:
   run:
@@ -23,6 +36,7 @@ concurrency:
 
 jobs:
   engine:
+    if: ${{ !inputs.promote_build }}
     name: Engine (test + Windows smoke test)
     runs-on: windows-latest
     steps:
@@ -50,6 +64,7 @@ jobs:
           path: sentinel-lite/target/release/sentinel-service.exe
 
   installer:
+    if: ${{ !inputs.promote_build }}
     name: Installer (build + silent install/uninstall)
     runs-on: windows-latest
     steps:
@@ -215,10 +230,10 @@ jobs:
           path: sentinel-lite/target/release/bundle/nsis/*-setup.exe
 
   release:
-    name: Publish GitHub Release
+    name: Publish test build (pre-release)
     # Only builds that passed the Windows smoke test AND the install/uninstall test.
     needs: [engine, installer]
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    if: ${{ !inputs.promote_build && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -240,6 +255,9 @@ jobs:
           {
             echo "Automated build of commit ${GITHUB_SHA::7} on ${GITHUB_REF_NAME}."
             echo
+            echo "**Test build.** Installed copies do not update to it until it is promoted"
+            echo "(Actions > sentinel-lite > Run workflow > promote_build = ${{ github.run_number }})."
+            echo
             echo "This build passed the Windows smoke test (real service install, File Shield, Process Guard,"
             echo "YARA, archive scanning, ransomware decoys and rollback, startup clean-up, scheduled tasks) and the"
             echo "silent install / upgrade-from-Sentinel-Lite / uninstall test. Vigil was formerly called Sentinel-Lite."
@@ -256,9 +274,39 @@ jobs:
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
           target_commitish: ${{ github.sha }}
-          name: Vigil build ${{ github.run_number }}
+          name: Vigil build ${{ github.run_number }} (test)
           body_path: notes.md
-          make_latest: true
+          prerelease: true
+          make_latest: false
           files: |
             dist/*.exe
             dist/SHA256SUMS.txt
+
+  promote:
+    name: Release a tested build to everyone
+    if: ${{ inputs.promote_build }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - name: Promote
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD: ${{ inputs.promote_build }}
+        run: |
+          case "$BUILD" in ''|*[!0-9]*) echo "::error::promote_build must be a build number"; exit 1;; esac
+          tag="sentinel-lite-build-$BUILD"
+          # Must be a build this workflow published, with its installer and checksums.
+          assets=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
+          echo "$assets" | grep -q -- '-setup\.exe$' || { echo "::error::$tag has no installer"; exit 1; }
+          echo "$assets" | grep -qx 'SHA256SUMS.txt' || { echo "::error::$tag has no SHA256SUMS.txt"; exit 1; }
+          # Never move "latest" backwards.
+          latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name 2>/dev/null || true)
+          latest_n=${latest#sentinel-lite-build-}
+          case "$latest_n" in ''|*[!0-9]*) latest_n=0;; esac
+          if [ "$BUILD" -le "$latest_n" ]; then echo "::error::build $BUILD is not newer than the released build $latest_n"; exit 1; fi
+          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --prerelease=false --latest --title "Vigil build $BUILD"
+          echo "Released build $BUILD: installs update to it within 6 hours."
