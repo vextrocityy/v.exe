@@ -239,6 +239,16 @@ try {
     $backup = Get-ChildItem (Join-Path $env:USERPROFILE "Vigil Restore Backup") -Recurse -Filter report.txt | Select-Object -First 1
     if (-not $backup -or (Get-Item $backup.FullName).Length -ne 65536) { throw "FAIL: the encrypted copy was not kept in the backup folder" }
     Write-Host "PASS: rollback restored both files and kept the replaced copy" -ForegroundColor Green
+
+    # --- "It's safe": an allowed file is not detected again by any detector ----------
+    $safe = Join-Path $work "allowed-tool.ps1"
+    Set-Content $safe "Write-Host 'mine'`n# SENTINEL-LITE-YARA-TEST-MARKER-7f3c9a" -Encoding ascii
+    $r = (Invoke-Svc inspect $safe | Out-String | ConvertFrom-Json).data.reports[0]
+    if ($r.verdict -ne "malicious") { throw "FAIL: test file not detected before allowing it ($($r.verdict))" }
+    Invoke-Elevated @{ type = "allow_file"; data = @{ path = $safe } }
+    $r = (Invoke-Svc inspect $safe | Out-String | ConvertFrom-Json).data.reports[0]
+    if ($r.verdict -ne "no_threats") { throw "FAIL: allowed file still reported ($($r.verdict): $($r.summary))" }
+    Write-Host "PASS: a file marked safe is no longer reported (YARA included)" -ForegroundColor Green
     Remove-Item $rb, (Join-Path $env:USERPROFILE "Vigil Restore Backup") -Recurse -Force
 
     # --- Privacy Monitor: camera use recorded by Windows -> notified ------------------
@@ -263,7 +273,19 @@ try {
     Start-Sleep 3   # let File Shield finish with the new file
     $p1 = Start-Process $tool -ArgumentList "30" -PassThru -WindowStyle Hidden
     Wait-Until { $p1.HasExited -and (Events | Where-Object { $_.title -eq "Blocked unsigned program from Downloads" }) } "Execution Guard stopped an unsigned program from Downloads" 15
+    # Open items ("Needs your attention"): the block is one, and acting on it closes it.
+    if (-not ((Req @{ type = "get_attention" }) | Where-Object { $_.path -eq $tool })) { throw "FAIL: blocked program is not listed as needing attention" }
     Invoke-Elevated @{ type = "trust_app"; data = @{ path = $tool } }
+    if ((Req @{ type = "get_attention" }) | Where-Object { $_.path -eq $tool }) { throw "FAIL: trusting the program did not close its open item" }
+    Write-Host "PASS: open item listed, and closed by acting on it" -ForegroundColor Green
+    # "Terminate" only works on processes the engine itself suspended: never an arbitrary pid.
+    $victim = Start-Process "$env:SystemRoot\System32\PING.EXE" -ArgumentList "-n", "30", "127.0.0.1" -PassThru -WindowStyle Hidden
+    $refused = $false
+    try { Req @{ type = "process_action"; data = @{ pid = $victim.Id; action = "terminate" } } | Out-Null } catch { $refused = $true }
+    Start-Sleep 1
+    if (-not $refused -or $victim.HasExited) { throw "FAIL: the engine terminated a process it had not suspended" }
+    Stop-Process -Id $victim.Id -Force
+    Write-Host "PASS: terminate request for a process that was never suspended is refused" -ForegroundColor Green
     Wait-Until { ((Invoke-Svc settings | Out-String | ConvertFrom-Json).data.trusted_apps | Where-Object { $_.path -eq $tool }) } "program added to trusted apps"
     Start-Sleep 2
     $p2 = Start-Process $tool -ArgumentList "30" -PassThru -WindowStyle Hidden

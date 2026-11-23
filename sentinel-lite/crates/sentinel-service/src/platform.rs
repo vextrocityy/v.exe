@@ -12,6 +12,62 @@ pub struct ProcessEntry {
 
 pub use imp::*;
 
+/// Running from the protected install folder (Program Files), as opposed to a
+/// developer or CI run from a build directory.
+pub fn installed() -> bool {
+    install_dir().is_some_and(|d| is_protected_dir(&d))
+}
+
+/// Task Scheduler definition of the update watchdog: every 5 minutes from
+/// `first_run_unix` and at boot, as SYSTEM, on battery too.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn watchdog_task_xml(first_run_unix: i64) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>Restarts Vigil protection if an update is interrupted. Vigil removes this task itself.</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <TimeTrigger>
+      <Repetition>
+        <Interval>PT5M</Interval>
+        <StopAtDurationEnd>false</StopAtDurationEnd>
+      </Repetition>
+      <StartBoundary>{start}</StartBoundary>
+      <Enabled>true</Enabled>
+    </TimeTrigger>
+    <BootTrigger>
+      <Enabled>true</Enabled>
+    </BootTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>S-1-5-18</UserId>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <Enabled>true</Enabled>
+    <Hidden>true</Hidden>
+    <ExecutionTimeLimit>PT5M</ExecutionTimeLimit>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>sc.exe</Command>
+      <Arguments>start SentinelLite</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+"#,
+        start = crate::engine::rollback::iso_utc(first_run_unix)
+    )
+}
+
 /// Scheduled task that restarts the service if a self-update stops it and dies.
 pub const UPDATE_WATCHDOG_TASK: &str = "VigilUpdateWatchdog";
 
@@ -155,6 +211,18 @@ mod imp {
         }
         let chars = unsafe { std::slice::from_raw_parts(us.buffer, us.length as usize / 2) };
         Some(String::from_utf16_lossy(chars))
+    }
+
+    /// Wait until process `pid` has exited. True if it is gone (or was never there).
+    pub fn wait_for_exit(pid: u32, timeout_ms: u32) -> bool {
+        const SYNCHRONIZE: u32 = 0x0010_0000;
+        const WAIT_OBJECT_0: u32 = 0;
+        match Handle::open(SYNCHRONIZE, pid) {
+            Some(h) => unsafe {
+                windows_sys::Win32::System::Threading::WaitForSingleObject(h.0, timeout_ms) == WAIT_OBJECT_0
+            },
+            None => true,
+        }
     }
 
     pub fn terminate(pid: u32) -> bool {
@@ -403,22 +471,47 @@ mod imp {
     /// service every 5 minutes. The installer stops the service; if it then
     /// dies or hangs, protection still comes back. The service deletes the task
     /// as soon as it starts.
-    pub fn arm_update_watchdog() -> anyhow::Result<()> {
+    pub fn arm_update_watchdog(work_dir: &Path) -> anyhow::Result<()> {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        let out = std::process::Command::new("schtasks.exe")
-            .args([
-                "/Create", "/F", "/TN", super::UPDATE_WATCHDOG_TASK, "/SC", "MINUTE", "/MO", "5", "/RU", "SYSTEM",
-                "/RL", "HIGHEST", "/TR", "sc.exe start SentinelLite",
-            ])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()?;
-        anyhow::ensure!(
-            out.status.success(),
-            "schtasks: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-        Ok(())
+        let run = |args: &[&str]| -> anyhow::Result<()> {
+            let out = std::process::Command::new("schtasks.exe")
+                .args(args)
+                .creation_flags(CREATE_NO_WINDOW)
+                .output()?;
+            anyhow::ensure!(
+                out.status.success(),
+                "schtasks: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+            Ok(())
+        };
+        // From XML, because the command line cannot say "also on battery" (the
+        // default is mains power only, i.e. no safety net on an unplugged laptop).
+        // First run 5 minutes from now, so it never races a normal install.
+        let xml = super::watchdog_task_xml(crate::database::now_unix() + 300);
+        let file = work_dir.join("watchdog.xml");
+        let mut bytes = vec![0xFF, 0xFE];
+        bytes.extend(xml.encode_utf16().flat_map(|u| u.to_le_bytes()));
+        let from_xml = std::fs::write(&file, bytes)
+            .map_err(anyhow::Error::from)
+            .and_then(|()| {
+                run(&["/Create", "/F", "/TN", super::UPDATE_WATCHDOG_TASK, "/XML", &file.to_string_lossy()])
+            });
+        let _ = std::fs::remove_file(&file);
+        match from_xml {
+            Ok(()) => {
+                tracing::info!("update watchdog armed (xml)");
+                Ok(())
+            }
+            Err(e) => {
+                tracing::warn!(error = %format!("{e:#}"), "watchdog XML rejected; using the basic task");
+                run(&[
+                    "/Create", "/F", "/TN", super::UPDATE_WATCHDOG_TASK, "/SC", "MINUTE", "/MO", "5", "/RU", "SYSTEM",
+                    "/RL", "HIGHEST", "/TR", "sc.exe start SentinelLite",
+                ])
+            }
+        }
     }
 
     pub fn disarm_update_watchdog() {
@@ -707,7 +800,7 @@ mod imp {
         false
     }
 
-    pub fn arm_update_watchdog() -> anyhow::Result<()> {
+    pub fn arm_update_watchdog(_work_dir: &std::path::Path) -> anyhow::Result<()> {
         Ok(())
     }
 

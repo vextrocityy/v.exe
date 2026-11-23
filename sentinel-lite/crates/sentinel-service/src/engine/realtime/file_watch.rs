@@ -75,6 +75,22 @@ pub fn start(engine: Arc<Engine>) -> Result<ShieldHandle, String> {
                                 fresh.created(p, now);
                             }
                         }
+                        // A fresh temp file renamed into place stays "fresh".
+                        match ev.kind {
+                            NEvent::Modify(ModifyKind::Name(RenameMode::To))
+                                if rename_from.as_ref().is_some_and(|f| fresh.is_fresh(f, now)) =>
+                            {
+                                for p in &ev.paths {
+                                    fresh.created(p, now);
+                                }
+                            }
+                            NEvent::Modify(ModifyKind::Name(RenameMode::Both))
+                                if ev.paths.len() == 2 && fresh.is_fresh(&ev.paths[0], now) =>
+                            {
+                                fresh.created(&ev.paths[1], now);
+                            }
+                            _ => {}
+                        }
                         for (path, activity) in classify(&ev, &mut rename_from) {
                             if engine.is_excluded(&path) {
                                 continue;

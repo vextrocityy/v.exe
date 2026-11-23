@@ -1,11 +1,12 @@
-import { useState } from "react";
-import { Activity, AlertOctagon, Ban, Bug, Camera, Check, Copy, DownloadCloud, FileWarning, FolderOpen, History, Info, KeyRound, Lock, Mic, Network, PauseCircle, Play, ScanLine, Settings2, Skull } from "lucide-react";
+import { memo, useState } from "react";
+import { Activity, AlertOctagon, Ban, Bug, Camera, Check, Copy, DownloadCloud, FileWarning, FolderOpen, History, Info, KeyRound, Lock, Mic, Network, PauseCircle, ScanLine, Settings2 } from "lucide-react";
 import { api } from "../lib/api";
-import { NetworkBlock } from "./NetworkBlock";
 import type { EventKind, SecurityEvent, Severity } from "../lib/types";
 import { shortPath, timeAgo } from "../lib/format";
+import { EventActions, isFilePath } from "./EventActions";
+import { NetworkBlock } from "./NetworkBlock";
 
-const KIND_ICON: Record<EventKind, typeof Info> = {
+export const KIND_ICON: Record<EventKind, typeof Info> = {
   threat_detected: Bug,
   threat_quarantined: Lock,
   process_blocked: Ban,
@@ -23,7 +24,7 @@ const KIND_ICON: Record<EventKind, typeof Info> = {
   network_alert: Network,
 };
 
-const SEVERITY: Record<Severity, string> = {
+export const SEVERITY: Record<Severity, string> = {
   info: "text-slate-400 bg-slate-400/10",
   low: "text-cyan-300 bg-cyan-400/10",
   medium: "text-amber-300 bg-amber-400/10",
@@ -31,127 +32,58 @@ const SEVERITY: Record<Severity, string> = {
   critical: "text-rose-200 bg-rose-500/25 ring-1 ring-rose-500/40",
 };
 
-/** `networkBlock`: Pi-hole is connected, so detections offer network-wide blocking. */
-export function ActivityLog({ events, limit, compact, networkBlock }: { events: SecurityEvent[]; limit?: number; compact?: boolean; networkBlock?: boolean }) {
+export function iconFor(e: SecurityEvent) {
+  return e.kind === "device_access" && e.title.startsWith("Microphone") ? Mic : KIND_ICON[e.kind] ?? Info;
+}
+
+interface Props {
+  events: SecurityEvent[];
+  limit?: number;
+  compact?: boolean;
+  /** Ids of items still waiting for a decision: only those show action buttons. */
+  openIds?: Set<number>;
+  onChanged?: () => void;
+  /** Pi-hole is connected, so detections offer network-wide blocking. */
+  networkBlock?: boolean;
+}
+
+export function ActivityLog({ events, limit, compact, openIds, onChanged, networkBlock }: Props) {
   const rows = limit ? events.slice(0, limit) : events;
   if (rows.length === 0) {
     return <p className="px-5 py-10 text-center text-sm text-slate-500">No activity yet.</p>;
   }
   return (
     <ul className="divide-y divide-slate-800/70">
-      {rows.map((e) => {
-        const Icon = e.kind === "device_access" && e.title.startsWith("Microphone") ? Mic : KIND_ICON[e.kind] ?? Info;
-        return (
-          <li key={e.id} className="flex items-start gap-3 px-5 py-3 hover:bg-slate-800/30">
-            <span className={`mt-0.5 grid h-7 w-7 shrink-0 place-items-center rounded-md ${SEVERITY[e.severity]}`}>
-              <Icon className="h-3.5 w-3.5" />
-            </span>
-            <div className="min-w-0 flex-1">
-              <div className="flex items-baseline justify-between gap-3">
-                <p className="truncate text-sm text-slate-200">{e.title}</p>
-                <time className="shrink-0 text-xs text-slate-500">{timeAgo(e.timestamp)}</time>
-              </div>
-              {e.path && (compact ? <p className="truncate font-mono text-xs text-slate-500" title={e.path}>{shortPath(e.path, 56)}</p> : <PathLine path={e.path} />)}
-              {!compact && e.detail && <p className="mt-0.5 text-xs text-slate-400">{e.detail}</p>}
-              {e.kind === "process_suspended" && e.pid != null && <SuspendedActions pid={e.pid} />}
-              {e.kind === "process_blocked" && e.title.startsWith("Blocked unsigned program") && e.path && <AllowButton path={e.path} />}
-              {!compact && e.kind === "persistence_change" && /^(New scheduled task|Scheduled task changed)/.test(e.title) && e.path && <DisableTaskButton name={e.path} />}
-              {!compact && e.kind === "threat_detected" && e.title.endsWith("suspicious file left in place") && e.path && <QuarantineButton path={e.path} threat={e.title.replace(/: suspicious file left in place$/, "")} />}
-              {!compact && networkBlock && (e.kind === "threat_detected" || e.kind === "behavior_alert") && <NetworkBlock around={e.timestamp} threat={e.title} />}
-            </div>
-          </li>
-        );
-      })}
+      {rows.map((e) => (
+        <Row key={e.id} e={e} compact={!!compact} open={!compact && !!openIds?.has(e.id)} onChanged={onChanged} networkBlock={!compact && !!networkBlock} />
+      ))}
     </ul>
   );
 }
 
-/** Decision buttons for a process the engine froze after a decoy was touched. */
-function SuspendedActions({ pid }: { pid: number }) {
-  const [state, setState] = useState<"idle" | "busy" | "done">("idle");
-  const [msg, setMsg] = useState<string | null>(null);
-  const act = async (action: "terminate" | "resume") => {
-    setState("busy");
-    setMsg(null);
-    try {
-      await api.processAction(pid, action);
-      setState("done");
-      setMsg(action === "terminate" ? "Terminated and quarantined." : "Resumed.");
-    } catch (err) {
-      setState("idle");
-      setMsg(String(err));
-    }
-  };
-  if (state === "done") return <p className="mt-2 text-xs text-emerald-400">{msg}</p>;
+const Row = memo(function Row({ e, compact, open, onChanged, networkBlock }: { e: SecurityEvent; compact: boolean; open: boolean; onChanged?: () => void; networkBlock: boolean }) {
+  const Icon = iconFor(e);
   return (
-    <div className="mt-2 flex flex-wrap items-center gap-2">
-      <button disabled={state === "busy"} onClick={() => act("terminate")} className="flex items-center gap-1 rounded-md bg-rose-500/90 px-2.5 py-1 text-xs font-medium text-white hover:bg-rose-500 disabled:opacity-50">
-        <Skull className="h-3.5 w-3.5" /> Terminate &amp; quarantine
-      </button>
-      <button disabled={state === "busy"} onClick={() => act("resume")} title="Requires administrator approval" className="flex items-center gap-1 rounded-md border border-slate-700 px-2.5 py-1 text-xs text-slate-300 hover:border-amber-400/50 hover:text-amber-300 disabled:opacity-50">
-        <Play className="h-3.5 w-3.5" /> Resume (it's safe)
-      </button>
-      {msg && <span className="text-xs text-rose-400">{msg}</span>}
-    </div>
+    <li className="flex items-start gap-3 px-5 py-3 hover:bg-slate-800/30">
+      <span className={`mt-0.5 grid h-7 w-7 shrink-0 place-items-center rounded-md ${SEVERITY[e.severity]}`} title={`Severity: ${e.severity}`}>
+        <Icon className="h-3.5 w-3.5" />
+      </span>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-baseline justify-between gap-3">
+          <p className="truncate text-sm text-slate-200">
+            {e.title}
+            {open && <span className="ml-2 rounded bg-amber-400/15 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-300">needs a decision</span>}
+          </p>
+          <time className="shrink-0 text-xs text-slate-500">{timeAgo(e.timestamp)}</time>
+        </div>
+        {e.path && (compact ? <p className="truncate font-mono text-xs text-slate-500" title={e.path}>{shortPath(e.path, 56)}</p> : <PathLine path={e.path} />)}
+        {!compact && e.detail && <p className="mt-0.5 text-xs text-slate-400">{e.detail}</p>}
+        {open && <EventActions event={e} onChanged={onChanged ?? (() => {})} />}
+        {networkBlock && e.severity !== "info" && (e.kind === "threat_detected" || e.kind === "behavior_alert") && <NetworkBlock around={e.timestamp} threat={e.title} />}
+      </div>
+    </li>
   );
-}
-
-/** Execution Guard blocked an unsigned program; let the user trust this exact file. */
-function AllowButton({ path }: { path: string }) {
-  const [state, setState] = useState<"idle" | "busy" | "done">("idle");
-  const [err, setErr] = useState<string | null>(null);
-  const allow = async () => {
-    setState("busy");
-    setErr(null);
-    try {
-      await api.trustApp(path);
-      setState("done");
-    } catch (e) {
-      setState("idle");
-      setErr(String(e));
-    }
-  };
-  if (state === "done") return <p className="mt-2 text-xs text-emerald-400">Trusted. Start it again; it will be allowed from now on.</p>;
-  return (
-    <div className="mt-2 flex items-center gap-2">
-      <button disabled={state === "busy"} onClick={allow} title="Requires administrator approval" className="rounded-md border border-slate-700 px-2.5 py-1 text-xs text-slate-300 hover:border-emerald-400/50 hover:text-emerald-300 disabled:opacity-50">
-        Always allow this program
-      </button>
-      {err && <span className="text-xs text-rose-400">{err}</span>}
-    </div>
-  );
-}
-
-/** A new / changed scheduled task: let the user switch it off. */
-function DisableTaskButton({ name }: { name: string }) {
-  const [state, setState] = useState<"idle" | "busy" | "done">("idle");
-  const [err, setErr] = useState<string | null>(null);
-  const disable = async () => {
-    setState("busy");
-    setErr(null);
-    try {
-      await api.disableTask(name);
-      setState("done");
-    } catch (e) {
-      setState("idle");
-      setErr(String(e));
-    }
-  };
-  if (state === "done") return <p className="mt-2 text-xs text-emerald-400">Disabled. Re-enable it in Task Scheduler if you need it.</p>;
-  return (
-    <div className="mt-2 flex items-center gap-2">
-      <button disabled={state === "busy"} onClick={disable} title="Requires administrator approval" className="rounded-md border border-slate-700 px-2.5 py-1 text-xs text-slate-300 hover:border-rose-400/50 hover:text-rose-300 disabled:opacity-50">
-        Disable this task
-      </button>
-      {err && <span className="text-xs text-rose-400">{err}</span>}
-    </div>
-  );
-}
-
-/** A real file path (drive or UNC), as opposed to a scheduled-task name. */
-function isFilePath(p: string): boolean {
-  return /^[A-Za-z]:[\\/]|^\\\\/.test(p);
-}
+});
 
 async function copyText(text: string): Promise<void> {
   try {
@@ -172,7 +104,7 @@ export function PathLine({ path }: { path: string }) {
   const [err, setErr] = useState<string | null>(null);
   const file = isFilePath(path);
   const copy = async () => {
-    await copyText(path);
+    await copyText(path).catch(() => {});
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   };
@@ -197,32 +129,6 @@ export function PathLine({ path }: { path: string }) {
           </button>
         )}
       </div>
-      {err && <span className="text-xs text-rose-400">{err}</span>}
-    </div>
-  );
-}
-
-/** A low-confidence match left in place: quarantine it after review. */
-function QuarantineButton({ path, threat }: { path: string; threat: string }) {
-  const [state, setState] = useState<"idle" | "busy" | "done">("idle");
-  const [err, setErr] = useState<string | null>(null);
-  const go = async () => {
-    setState("busy");
-    setErr(null);
-    try {
-      await api.quarantinePath(path, threat);
-      setState("done");
-    } catch (e) {
-      setState("idle");
-      setErr(String(e));
-    }
-  };
-  if (state === "done") return <p className="mt-2 text-xs text-emerald-400">Moved to quarantine. You can restore it from Quarantine.</p>;
-  return (
-    <div className="mt-2 flex items-center gap-2">
-      <button disabled={state === "busy"} onClick={go} title="Requires administrator approval" className="flex items-center gap-1 rounded-md border border-slate-700 px-2.5 py-1 text-xs text-slate-300 hover:border-rose-400/50 hover:text-rose-300 disabled:opacity-50">
-        <Lock className="h-3.5 w-3.5" /> Quarantine it
-      </button>
       {err && <span className="text-xs text-rose-400">{err}</span>}
     </div>
   );

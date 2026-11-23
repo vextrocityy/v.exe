@@ -204,7 +204,8 @@ async fn list_snapshots() -> Result<Vec<Snapshot>, String> {
 
 #[tauri::command]
 async fn create_snapshot() -> Result<(), String> {
-    call(Request::CreateSnapshot).await.map(|_| ()).map_err(Into::into)
+    // Each snapshot replaces the oldest one, so the service asks for approval.
+    call_privileged(Request::CreateSnapshot).await.map(|_| ())
 }
 
 #[derive(serde::Serialize)]
@@ -294,10 +295,27 @@ async fn restore_quarantine(id: String) -> Result<(), String> {
 
 #[tauri::command]
 async fn delete_quarantine(id: String) -> Result<(), String> {
-    call(Request::DeleteQuarantine { id })
-        .await
-        .map(|_| ())
-        .map_err(Into::into)
+    call_privileged(Request::DeleteQuarantine { id }).await.map(|_| ())
+}
+
+/// Open items that wait for the user's decision.
+#[tauri::command]
+async fn get_attention() -> Result<Vec<SecurityEvent>, String> {
+    match call(Request::GetAttention).await? {
+        Response::Events(v) => Ok(v),
+        r => Err(unexpected(r)),
+    }
+}
+
+#[tauri::command]
+async fn resolve_event(id: i64) -> Result<(), String> {
+    call(Request::ResolveEvent { id }).await.map(|_| ()).map_err(Into::into)
+}
+
+/// "This file is safe": never report it again (administrator approval).
+#[tauri::command]
+async fn allow_file(path: String) -> Result<(), String> {
+    call_privileged(Request::AllowFile { path }).await.map(|_| ())
 }
 
 #[tauri::command]
@@ -329,8 +347,12 @@ fn show_main(app: &AppHandle) {
 /// Desktop notification for events the user must know about even with the window closed.
 fn maybe_notify(app: &AppHandle, ev: &SecurityEvent) {
     let important = match ev.kind {
-        EventKind::ThreatDetected | EventKind::ProcessBlocked | EventKind::ProcessSuspended => true,
+        // Info = a weak match on a program Windows vouches for: history only.
+        EventKind::ThreatDetected => ev.severity >= Severity::Low,
+        EventKind::ProcessBlocked | EventKind::ProcessSuspended => true,
         EventKind::BehaviorAlert => ev.severity >= Severity::High,
+        // A threat that could not be quarantined is still on the PC.
+        EventKind::ScanError => ev.severity >= Severity::High,
         // Camera / microphone switched on (switching off is Info: no toast).
         EventKind::DeviceAccess => ev.severity >= Severity::Low,
         EventKind::PersistenceChange => ev.severity >= Severity::High,
@@ -340,6 +362,35 @@ fn maybe_notify(app: &AppHandle, ev: &SecurityEvent) {
     };
     if !important {
         return;
+    }
+    // A scan of a folder full of detections must not raise hundreds of toasts:
+    // at most 4 in 30 s, then one summary; and never the same title twice in a row.
+    {
+        static STATE: std::sync::Mutex<Option<(std::time::Instant, u32, String)>> = std::sync::Mutex::new(None);
+        let mut st = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let now = std::time::Instant::now();
+        let (start, count, last) = st.get_or_insert_with(|| (now, 0, String::new()));
+        if now.duration_since(*start) > Duration::from_secs(30) {
+            *start = now;
+            *count = 0;
+            last.clear();
+        }
+        if *last == ev.title {
+            return;
+        }
+        *last = ev.title.clone();
+        *count += 1;
+        if *count == 5 {
+            let _ = app
+                .notification()
+                .builder()
+                .title("Vigil: more alerts")
+                .body("Several things happened at once. Open Vigil to see what needs your attention.")
+                .show();
+        }
+        if *count >= 5 {
+            return;
+        }
     }
     let body = ev
         .path
@@ -357,14 +408,34 @@ fn maybe_notify(app: &AppHandle, ev: &SecurityEvent) {
 
 /// Keep a subscription open and forward pushed events to the webview as
 /// `sentinel://event`; reconnect forever if the service restarts.
+const TRAY_OK: &str = "Vigil: protection is on";
+const TRAY_OFF: &str = "Vigil: PROTECTION IS OFF (the engine is not running). Open Vigil to start it.";
+
+fn set_tray_tooltip(app: &AppHandle, text: &str) {
+    if let Some(tray) = app.tray_by_id("main") {
+        let _ = tray.set_tooltip(Some(text));
+    }
+}
+
 fn spawn_event_bridge(app: AppHandle) {
     std::thread::Builder::new()
         .name("sentinel-events".into())
-        .spawn(move || loop {
+        .spawn(move || {
+          // The dashboard is the only thing that can tell the user the engine has
+          // stopped: after 45 s without it, say so once (toast + tray), even when
+          // the window is hidden in the tray.
+          let mut down_since: Option<std::time::Instant> = None;
+          let mut told = false;
+          loop {
+            let connected_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let flag = connected_flag.clone();
+            let app_ok = app.clone();
             let result = (|| -> Result<(), String> {
                 let mut conn = client::connect()?;
                 write_frame(&mut conn, &Request::Subscribe).map_err(|e| e.to_string())?;
                 let _ack: Response = read_frame(&mut conn).map_err(|e| e.to_string())?;
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                set_tray_tooltip(&app_ok, TRAY_OK);
                 let _ = app.emit("sentinel://connection", true);
                 loop {
                     match read_frame::<_, Response>(&mut conn) {
@@ -383,7 +454,26 @@ fn spawn_event_bridge(app: AppHandle) {
                 let _ = app.emit("sentinel://connection", false);
                 eprintln!("event bridge: {e}");
             }
-            std::thread::sleep(Duration::from_secs(3));
+            if connected_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                // We were connected and lost it just now: start the clock afresh.
+                down_since = Some(std::time::Instant::now());
+                told = false;
+            }
+            let since = *down_since.get_or_insert_with(std::time::Instant::now);
+            if !told && since.elapsed() > Duration::from_secs(45) {
+                told = true;
+                set_tray_tooltip(&app, TRAY_OFF);
+                let _ = app
+                    .notification()
+                    .builder()
+                    .title("Vigil: protection is off")
+                    .body("The protection engine is not running. Open Vigil and choose Start protection.")
+                    .show();
+            }
+            // Retry quickly at first, then every 15 s: no busy loop while it is down for days.
+            let pause = if since.elapsed() > Duration::from_secs(120) { 15 } else { 3 };
+            std::thread::sleep(Duration::from_secs(pause));
+          }
         })
         .expect("spawn event bridge");
 }
@@ -394,7 +484,7 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     let quit = MenuItem::with_id(app, "quit", "Close dashboard (protection stays on)", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&open, &scan, &quit])?;
     let mut tray = TrayIconBuilder::with_id("main")
-        .tooltip("Vigil: protection is handled by the background service")
+        .tooltip("Vigil")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
@@ -480,6 +570,9 @@ pub fn run() {
             list_quarantine,
             restore_quarantine,
             delete_quarantine,
+            get_attention,
+            resolve_event,
+            allow_file,
             get_settings,
             update_settings,
         ])

@@ -4,6 +4,7 @@ import { HardeningPanel } from "../components/HardeningPanel";
 import { HomeNetworkCard } from "../components/HomeNetworkCard";
 import { ResourceCard } from "../components/ResourceCard";
 import { ActivityLog } from "../components/ActivityLog";
+import { AttentionList } from "../components/AttentionList";
 import { Panel } from "../components/Panel";
 import { ScanPanel } from "../components/ScanPanel";
 import { ShieldHero } from "../components/ShieldHero";
@@ -23,7 +24,18 @@ function signatureHint(status: EngineStatus | null): { text: string; warn: boole
   return { text: `Updated ${timeAgo(status.last_signature_update)}${yara}`, warn: stale };
 }
 
-export function Dashboard({ status, events, refresh, onSeeAll, onOpenSettings }: { status: EngineStatus | null; events: SecurityEvent[]; refresh: () => Promise<void>; onSeeAll: () => void; onOpenSettings: () => void }) {
+interface Props {
+  status: EngineStatus | null;
+  events: SecurityEvent[];
+  attention: SecurityEvent[];
+  offline: boolean;
+  refresh: () => Promise<void>;
+  onSeeAll: () => void;
+  onNavigate: (page: "recovery") => void;
+  onOpenSettings: () => void;
+}
+
+export function Dashboard({ status, events, attention, offline, refresh, onSeeAll, onNavigate, onOpenSettings }: Props) {
   const [updateError, setUpdateError] = useState<string | null>(null);
   const sig = signatureHint(status);
   const updating = !!status?.update_in_progress;
@@ -41,7 +53,12 @@ export function Dashboard({ status, events, refresh, onSeeAll, onOpenSettings }:
       <DevicesInUse devices={status?.devices_in_use ?? []} compact />
       <div className="grid grid-cols-[1fr_340px] gap-6">
         <Panel className="flex items-center px-8 py-8">
-          <ShieldHero status={status} onAcknowledge={async () => { await api.acknowledgeThreats(); await refresh(); }} />
+          <ShieldHero
+            status={status}
+            offline={offline}
+            attention={attention.length}
+            onShowAttention={() => document.getElementById("attention")?.scrollIntoView({ behavior: "smooth", block: "start" })}
+          />
         </Panel>
         <Panel title="Scan">
           <ScanPanel
@@ -51,6 +68,8 @@ export function Dashboard({ status, events, refresh, onSeeAll, onOpenSettings }:
           />
         </Panel>
       </div>
+
+      {status && <AttentionList items={attention} onChanged={refresh} onNavigate={onNavigate} />}
 
       <div className="grid grid-cols-4 gap-4">
         <StatCard icon={ShieldOff} accent="rose" label="Threats blocked" value={formatNumber(status?.threats_blocked_total ?? 0)} hint="All time" />
@@ -90,7 +109,8 @@ export function Dashboard({ status, events, refresh, onSeeAll, onOpenSettings }:
         </Panel>
       </div>
       <HomeNetworkCard home={status?.home_network} onSetUp={onOpenSettings} />
-      <HardeningPanel checks={status?.hardening ?? []} onChanged={refresh} />
+      {/* Only when something is off: a list of green ticks is not worth the space. */}
+      {(status?.hardening ?? []).some((c) => !c.ok) && <HardeningPanel checks={status?.hardening ?? []} onChanged={refresh} />}
     </div>
   );
 }

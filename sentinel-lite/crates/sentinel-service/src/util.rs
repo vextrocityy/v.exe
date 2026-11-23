@@ -129,9 +129,58 @@ pub fn path_within(path: &str, prefix: &str) -> bool {
     p == pre || (p.starts_with(&pre) && p.as_bytes().get(pre.len()) == Some(&b'\\'))
 }
 
+/// Does `path` pass through a symbolic link or junction (the file itself or
+/// any folder above it)? The SYSTEM service must not move, delete or write
+/// files through links a user could have planted to redirect it.
+pub fn has_link_component(path: &Path) -> bool {
+    path.ancestors()
+        .filter(|p| p.parent().is_some()) // not the drive / filesystem root
+        .any(|p| std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()))
+}
+
+/// `http://127.0.0.1[:port]/…` or `http://localhost[:port]/…`, compared on the
+/// real host: `http://127.0.0.1.evil.com/` and `http://127.0.0.1:80@evil.com/` are not loopback.
+pub fn is_loopback_url(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("http://") else { return false };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.contains('@') {
+        return false;
+    }
+    let host = authority.rsplit_once(':').map_or(authority, |(h, port)| {
+        if port.bytes().all(|b| b.is_ascii_digit()) {
+            h
+        } else {
+            authority
+        }
+    });
+    host == "127.0.0.1" || host.eq_ignore_ascii_case("localhost")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn loopback_urls_are_matched_on_the_host() {
+        assert!(is_loopback_url("http://127.0.0.1:8765/latest"));
+        assert!(is_loopback_url("http://localhost/x"));
+        assert!(!is_loopback_url("http://127.0.0.1.evil.com/x"));
+        assert!(!is_loopback_url("http://localhost.evil.com/"));
+        assert!(!is_loopback_url("http://127.0.0.1:80@evil.com/x"));
+        assert!(!is_loopback_url("https://127.0.0.1/x"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn links_in_a_path_are_noticed() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("f.txt"), b"x").unwrap();
+        assert!(!has_link_component(&real.join("f.txt")));
+        std::os::unix::fs::symlink(&real, dir.path().join("link")).unwrap();
+        assert!(has_link_component(&dir.path().join("link").join("f.txt")));
+    }
 
     #[test]
     fn contain_recovers_from_panic() {

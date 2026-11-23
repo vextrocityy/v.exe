@@ -29,6 +29,24 @@ pub fn user_profiles() -> Vec<PathBuf> {
         .collect()
 }
 
+/// Where a user's `Desktop` / `Documents` / `Pictures` / … really is. With
+/// OneDrive folder backup (the Windows 11 default) the folder lives under
+/// `<profile>\OneDrive\<name>`, and `<profile>\<name>` is empty or gone.
+/// Returns every existing candidate.
+pub fn personal_folders(profile: &std::path::Path, name: &str) -> Vec<PathBuf> {
+    let mut v = vec![profile.join(name)];
+    if let Ok(entries) = std::fs::read_dir(profile) {
+        for e in entries.flatten() {
+            // "OneDrive", "OneDrive - Contoso"
+            if e.file_name().to_string_lossy().to_ascii_lowercase().starts_with("onedrive") {
+                v.push(e.path().join(name));
+            }
+        }
+    }
+    v.retain(|p| p.is_dir());
+    v
+}
+
 fn existing(paths: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = paths.into_iter().filter(|p| p.is_dir()).collect();
     out.sort();
@@ -40,8 +58,8 @@ fn existing(paths: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
 pub fn hot_folders() -> Vec<PathBuf> {
     let mut v = Vec::new();
     for profile in user_profiles() {
-        v.push(profile.join("Downloads"));
-        v.push(profile.join("Desktop"));
+        v.extend(personal_folders(&profile, "Downloads"));
+        v.extend(personal_folders(&profile, "Desktop"));
         #[cfg(windows)]
         {
             v.push(profile.join(r"AppData\Local\Temp"));
@@ -91,9 +109,28 @@ pub fn full_scan_roots() -> Vec<PathBuf> {
 pub fn watch_roots(extra: &[String]) -> Vec<PathBuf> {
     let mut v = hot_folders();
     for profile in user_profiles() {
-        v.push(profile.join("Documents"));
-        v.push(profile.join("Pictures")); // ransomware decoys live here too
+        v.extend(personal_folders(&profile, "Documents"));
+        v.extend(personal_folders(&profile, "Pictures")); // ransomware decoys live here too
     }
     v.extend(extra.iter().map(PathBuf::from));
     existing(v)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_folders_moved_into_onedrive() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = dir.path().join("cranc");
+        for d in ["Desktop", "OneDrive/Desktop", "OneDrive/Documents", "OneDrive - Work/Documents", "Music"] {
+            std::fs::create_dir_all(profile.join(d)).unwrap();
+        }
+        let mut desk = personal_folders(&profile, "Desktop");
+        desk.sort();
+        assert_eq!(desk, vec![profile.join("Desktop"), profile.join("OneDrive").join("Desktop")]);
+        assert_eq!(personal_folders(&profile, "Documents").len(), 2);
+        assert!(personal_folders(&profile, "Pictures").is_empty());
+    }
 }

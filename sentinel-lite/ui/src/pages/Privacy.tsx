@@ -52,6 +52,10 @@ export function PrivacyPage({ status }: { status: EngineStatus | null }) {
     <div className="space-y-6">
       {live.length > 0 ? (
         <DevicesInUse devices={live} />
+      ) : !status ? (
+        <div className="rounded-xl border border-slate-700 bg-slate-800/40 px-5 py-4 text-sm text-slate-400">
+          Camera and microphone use is unknown while the protection engine is not running.
+        </div>
       ) : (
         <div className="flex items-center gap-3 rounded-xl border border-emerald-500/20 bg-emerald-500/5 px-5 py-4 text-sm text-emerald-200">
           <ShieldCheck className="h-5 w-5 text-emerald-400" />

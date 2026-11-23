@@ -122,6 +122,9 @@ const MIGRATIONS: &[&str] = &[
         description   TEXT NOT NULL
      );
      CREATE INDEX IF NOT EXISTS removed_persistence_q ON removed_persistence(quarantine_id);",
+    // 5: open items ("needs your attention"): 1 while waiting for the user's decision
+    "ALTER TABLE events ADD COLUMN attention INTEGER NOT NULL DEFAULT 0;
+     CREATE INDEX IF NOT EXISTS events_attention ON events(attention) WHERE attention = 1;",
 ];
 
 /// A cached YARA verdict: `None` = scanned clean.
@@ -341,8 +344,8 @@ impl Database {
     pub fn insert_event(&self, mut ev: SecurityEvent) -> Result<SecurityEvent> {
         let c = self.conn();
         c.execute(
-            "INSERT INTO events (timestamp, kind, severity, title, detail, path, pid)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO events (timestamp, kind, severity, title, detail, path, pid, attention)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 ev.timestamp,
                 enum_str(&ev.kind),
@@ -350,7 +353,8 @@ impl Database {
                 ev.title,
                 ev.detail,
                 ev.path,
-                ev.pid
+                ev.pid,
+                ev.attention
             ],
         )?;
         ev.id = c.last_insert_rowid();
@@ -360,24 +364,110 @@ impl Database {
         Ok(ev)
     }
 
+    fn event_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<SecurityEvent> {
+        Ok(SecurityEvent {
+            id: r.get(0)?,
+            timestamp: r.get(1)?,
+            kind: enum_from(&r.get::<_, String>(2)?).unwrap_or(EventKind::ServiceInfo),
+            severity: enum_from(&r.get::<_, String>(3)?).unwrap_or(Severity::Info),
+            title: r.get(4)?,
+            detail: r.get(5)?,
+            path: r.get(6)?,
+            pid: r.get(7)?,
+            attention: r.get::<_, i64>(8)? != 0,
+        })
+    }
+
+    /// Open items, newest first (bounded).
+    pub fn open_attention(&self) -> Result<Vec<SecurityEvent>> {
+        let c = self.conn();
+        let mut stmt = c.prepare_cached(
+            "SELECT id, timestamp, kind, severity, title, detail, path, pid, attention FROM events
+             WHERE attention = 1 ORDER BY id DESC LIMIT 200",
+        )?;
+        let rows = stmt.query_map([], Self::event_from_row)?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// (open items, open items that mean "a threat is still on this PC").
+    pub fn attention_counts(&self) -> (u64, u64) {
+        self.conn()
+            .query_row(
+                "SELECT COUNT(*), COALESCE(SUM(kind IN ('threat_detected','process_suspended','behavior_alert','scan_error')), 0)
+                 FROM events WHERE attention = 1",
+                [],
+                |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64)),
+            )
+            .unwrap_or((0, 0))
+    }
+
+    /// Close one open item. Returns false if it was not open.
+    pub fn resolve_event(&self, id: i64) -> bool {
+        self.conn()
+            .execute("UPDATE events SET attention = 0 WHERE id = ?1 AND attention = 1", [id])
+            .map(|n| n > 0)
+            .unwrap_or(false)
+    }
+
+    /// Close every open item about `path` (case-insensitive, as Windows paths are).
+    pub fn resolve_path(&self, path: &str) -> usize {
+        self.conn()
+            .execute(
+                "UPDATE events SET attention = 0 WHERE attention = 1 AND path = ?1 COLLATE NOCASE",
+                [path],
+            )
+            .unwrap_or(0)
+    }
+
+    /// Close older open items with the same title about the same path, so a file
+    /// that is found again by every scan stays one item instead of piling up.
+    pub fn resolve_duplicates(&self, title: &str, path: Option<&str>) {
+        let _ = self.conn().execute(
+            "UPDATE events SET attention = 0 WHERE attention = 1 AND title = ?1 AND path IS ?2",
+            params![title, path],
+        );
+    }
+
+    pub fn resolve_pid(&self, pid: u32) -> usize {
+        self.conn()
+            .execute("UPDATE events SET attention = 0 WHERE attention = 1 AND pid = ?1", [pid])
+            .unwrap_or(0)
+    }
+
+    pub fn resolve_all(&self) -> usize {
+        self.conn()
+            .execute("UPDATE events SET attention = 0 WHERE attention = 1", [])
+            .unwrap_or(0)
+    }
+
+    pub fn is_allowed(&self, sha256: &str) -> bool {
+        self.conn()
+            .query_row("SELECT 1 FROM allowlist WHERE sha256 = ?1", [sha256], |r| r.get::<_, i64>(0))
+            .optional()
+            .ok()
+            .flatten()
+            .is_some()
+    }
+
+    /// The path cache gains a row for every file ever scanned (temp files
+    /// included). It is only a speed-up, so when it gets too big, start over.
+    pub fn prune_scan_cache(&self, max_rows: i64) {
+        let _ = self.conn().execute(
+            "DELETE FROM scan_cache WHERE (SELECT COUNT(*) FROM scan_cache) > ?1",
+            [max_rows],
+        );
+    }
+
     pub fn recent_events(&self, limit: u32, before_id: Option<i64>) -> Result<Vec<SecurityEvent>> {
         let c = self.conn();
         let mut stmt = c.prepare_cached(
-            "SELECT id, timestamp, kind, severity, title, detail, path, pid FROM events
+            "SELECT id, timestamp, kind, severity, title, detail, path, pid, attention FROM events
              WHERE id < ?1 ORDER BY id DESC LIMIT ?2",
         )?;
-        let rows = stmt.query_map(params![before_id.unwrap_or(i64::MAX), limit.min(1000)], |r| {
-            Ok(SecurityEvent {
-                id: r.get(0)?,
-                timestamp: r.get(1)?,
-                kind: enum_from(&r.get::<_, String>(2)?).unwrap_or(EventKind::ServiceInfo),
-                severity: enum_from(&r.get::<_, String>(3)?).unwrap_or(Severity::Info),
-                title: r.get(4)?,
-                detail: r.get(5)?,
-                path: r.get(6)?,
-                pid: r.get(7)?,
-            })
-        })?;
+        let rows = stmt.query_map(
+            params![before_id.unwrap_or(i64::MAX), limit.min(1000)],
+            Self::event_from_row,
+        )?;
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 

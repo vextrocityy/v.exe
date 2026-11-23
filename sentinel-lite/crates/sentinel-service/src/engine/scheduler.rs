@@ -54,6 +54,9 @@ pub fn run(engine: Arc<Engine>, stop: Arc<AtomicBool>) {
 }
 
 fn tick(engine: &Arc<Engine>) {
+    if engine.is_shutting_down() {
+        return;
+    }
     let s = engine.settings();
     let now = now_unix();
     let counter = |n: &str| engine.db.counter(n) as i64;
@@ -72,11 +75,17 @@ fn tick(engine: &Arc<Engine>) {
             tracing::warn!(error = %e, "scheduled update failed");
         }
     }
+    crate::engine::appupdate::expire_stale(engine);
     if s.auto_update_app && now - counter("last_app_update_check") >= 6 * 3600 {
         match engine.check_app_update() {
             Ok(line) => tracing::info!("app update: {line}"),
             Err(e) => tracing::warn!(error = %e, "scheduled app update check failed"),
         }
+    }
+    // An update may just have started installing, or the service is stopping:
+    // do not begin a snapshot or a scan now.
+    if engine.is_shutting_down() {
+        return;
     }
 
     if s.rollback_snapshots
@@ -92,7 +101,9 @@ fn tick(engine: &Arc<Engine>) {
             Ok(snap) => tracing::info!(id = %snap.id, "rollback snapshot taken"),
             Err(e) => tracing::warn!(error = %e, "rollback snapshot failed"),
         }
+        return; // one heavy job per tick: the scan can wait a minute
     }
+    engine.db.prune_scan_cache(400_000);
 
     if s.pihole_url.is_some() && now - counter("last_home_check") >= HOME_CHECK_SECS {
         engine.db.set_counter("last_home_check", now);

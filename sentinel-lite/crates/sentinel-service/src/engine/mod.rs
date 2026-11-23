@@ -24,7 +24,7 @@ use hasher::SkipReason;
 use quarantine::Quarantine;
 use sentinel_protocol::*;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Instant, UNIX_EPOCH};
 use tokio::sync::broadcast;
@@ -77,8 +77,6 @@ pub struct Engine {
     scan_cancel: Mutex<Option<Arc<AtomicBool>>>,
     realtime: Mutex<realtime::RealtimeManager>,
     shields: RwLock<Vec<ShieldStatus>>,
-    /// Detections that were not automatically quarantined.
-    unresolved_threats: AtomicU64,
     update_running: AtomicBool,
     scheduler: Mutex<Option<(Arc<AtomicBool>, std::thread::JoinHandle<()>)>>,
     pub yara: yara::YaraEngine,
@@ -101,6 +99,10 @@ pub struct Engine {
     restore_running: AtomicBool,
     /// Pi-hole client (kept so its login session is reused) and the last check's result.
     home: Mutex<(Option<Arc<homenet::Pihole>>, HomeNetworkStatus)>,
+    /// Set first thing at shutdown (and when an app update starts installing):
+    /// no new scan, snapshot or download may begin after that.
+    shutting_down: AtomicBool,
+    background_paused_until: Mutex<Option<Instant>>,
     started: Instant,
 }
 
@@ -124,7 +126,6 @@ impl Engine {
             scan_cancel: Mutex::new(None),
             realtime: Mutex::new(realtime::RealtimeManager::default()),
             shields: RwLock::new(Vec::new()),
-            unresolved_threats: AtomicU64::new(0),
             update_running: AtomicBool::new(false),
             scheduler: Mutex::new(None),
             yara: yara::YaraEngine::default(),
@@ -143,6 +144,8 @@ impl Engine {
             snapshot_running: AtomicBool::new(false),
             restore_running: AtomicBool::new(false),
             home: Mutex::new((None, HomeNetworkStatus::default())),
+            shutting_down: AtomicBool::new(false),
+            background_paused_until: Mutex::new(None),
             started: Instant::now(),
         }))
     }
@@ -157,6 +160,9 @@ impl Engine {
     pub fn update_settings(self: &Arc<Self>, new: Settings) -> Result<Settings> {
         let old = self.settings();
         let new = settings::merge_secrets(&old, settings::sanitize(new));
+        if new == old {
+            return Ok(new); // nothing to apply: do not restart the shields
+        }
         settings::save(&self.paths.settings, &new)?;
         *self.settings.write().unwrap_or_else(|e| e.into_inner()) = new.clone();
         self.emit(
@@ -182,7 +188,7 @@ impl Engine {
     /// Exclusions are case-insensitive, component-aware prefix matches. The engine's own data
     /// directory (DB, quarantine vault) is always excluded.
     pub fn is_excluded(&self, path: &Path) -> bool {
-        if path.starts_with(&self.paths.data) {
+        if path.starts_with(&self.paths.data) || self.is_own_file(path) {
             return true;
         }
         let p = path.to_string_lossy();
@@ -192,6 +198,20 @@ impl Engine {
             .exclusions
             .iter()
             .any(|ex| crate::util::path_within(&p, ex))
+    }
+
+    /// Vigil's own program files (install folder, when it is the protected one).
+    /// The engine never scans, quarantines or terminates itself: its binary
+    /// contains the very strings its rules look for.
+    pub fn is_own_file(&self, path: &Path) -> bool {
+        static DIR: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+        let dir = DIR.get_or_init(|| {
+            crate::platform::install_dir()
+                .filter(|d| crate::platform::is_protected_dir(d))
+                .map(|d| d.to_string_lossy().into_owned())
+        });
+        dir.as_deref()
+            .is_some_and(|d| crate::util::path_within(&path.to_string_lossy(), d))
     }
 
     // ----- events ------------------------------------------------------------
@@ -205,15 +225,48 @@ impl Engine {
         path: Option<&Path>,
         pid: Option<u32>,
     ) -> SecurityEvent {
+        self.emit_full(kind, severity, title.into(), detail, path, pid, false)
+    }
+
+    /// An event that waits for the user's decision: it stays in "Needs your
+    /// attention" until they act on it or dismiss it. A repeat of the same alert
+    /// about the same file replaces the older one.
+    pub fn emit_attention(
+        &self,
+        kind: EventKind,
+        severity: Severity,
+        title: impl Into<String>,
+        detail: Option<String>,
+        path: Option<&Path>,
+        pid: Option<u32>,
+    ) -> SecurityEvent {
+        let title = title.into();
+        self.db
+            .resolve_duplicates(&title, path.map(|p| p.to_string_lossy()).as_deref());
+        self.emit_full(kind, severity, title, detail, path, pid, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_full(
+        &self,
+        kind: EventKind,
+        severity: Severity,
+        title: String,
+        detail: Option<String>,
+        path: Option<&Path>,
+        pid: Option<u32>,
+        attention: bool,
+    ) -> SecurityEvent {
         let ev = SecurityEvent {
             id: 0,
             timestamp: now_unix(),
             kind,
             severity,
-            title: title.into(),
+            title,
             detail,
             path: path.map(|p| p.to_string_lossy().into_owned()),
             pid,
+            attention,
         };
         let ev = match self.db.insert_event(ev.clone()) {
             Ok(stored) => stored,
@@ -252,7 +305,9 @@ impl Engine {
             .modified()
             .ok()
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_secs() as i64)
+            // 100 ns units (NTFS resolution): a same-size rewrite within one second
+            // must not reuse the old hash.
+            .map(|d| (d.as_nanos() / 100) as i64)
             .unwrap_or(0);
         let key = path.to_string_lossy();
 
@@ -279,10 +334,13 @@ impl Engine {
             tracing::error!(error = %e, "signature lookup failed");
             None
         });
-        if hit.is_none() {
+        // "This file is safe" (restore from quarantine, Allow) covers every
+        // detector, not only hash lists: otherwise YARA would re-quarantine it at once.
+        let allowed = hit.is_none() && self.db.is_allowed(&sha256);
+        if hit.is_none() && !allowed {
             hit = self.yara_check(path, &sha256, size);
         }
-        if hit.is_none() {
+        if hit.is_none() && !allowed {
             hit = self.archive_check(path, &sha256, size);
         }
         Ok(FileVerdict { sha256, size, hit })
@@ -392,6 +450,11 @@ impl Engine {
                 return Err("it is a Windows system file".into());
             }
         }
+        // Store apps are catalog-signed (no embedded signature to check) and their
+        // folder is writable only by Windows itself.
+        if path.to_string_lossy().to_ascii_lowercase().contains("\\program files\\windowsapps\\") {
+            return Err("it belongs to a Microsoft Store app (a folder only Windows can change)".into());
+        }
         if crate::platform::has_valid_signature(path) {
             return Err("it carries a valid code signature".into());
         }
@@ -432,15 +495,40 @@ impl Engine {
             tracing::info!(path = %path.display(), rule = %hit.name, "ignored a match on our own ransomware decoy");
             return;
         }
+        // Exclusions apply to every detector and every source (quick scans also look at
+        // running programs, Persistence Watch at autostart targets).
+        if self.is_excluded(path) {
+            tracing::info!(path = %path.display(), rule = %hit.name, "ignored a match on an excluded path");
+            return;
+        }
         if let Err(reason) = self.may_remediate(path, hit) {
-            self.unresolved_threats.fetch_add(1, Ordering::Relaxed);
-            self.emit(
+            // A weak rule matching a program Windows vouches for is noise, not a
+            // threat: keep it in the history, do not ask the user to decide.
+            let vouched = reason.contains("valid code signature")
+                || reason.contains("Windows system file")
+                || reason.contains("Microsoft Store app");
+            let weak = hit.is_yara() && hit.score.unwrap_or(0) < self.settings().yara_min_remediate_score;
+            if vouched && weak {
+                self.emit(
+                    EventKind::ThreatDetected,
+                    Severity::Info,
+                    format!("{}: low-confidence match on a trusted program", hit.name),
+                    Some(format!(
+                        "Found by {source}: {}. No action needed: {reason}, and the rule is a weak one.",
+                        Self::match_description(hit, &verdict.sha256)
+                    )),
+                    Some(path),
+                    pid,
+                );
+                return;
+            }
+            self.emit_attention(
                 EventKind::ThreatDetected,
                 Severity::Medium,
                 format!("{}: suspicious file left in place", hit.name),
                 Some(format!(
                     "Found by {source}: {}. Not quarantined automatically because {reason}. \
-                     Review it, quarantine it with a manual scan if confirmed, or add an exclusion if it is safe.",
+                     Quarantine it if you do not trust it, or mark it as safe.",
                     Self::match_description(hit, &verdict.sha256)
                 )),
                 Some(path),
@@ -449,21 +537,18 @@ impl Engine {
             return;
         }
         self.db.incr_counter("threats_blocked");
-        self.emit(
-            EventKind::ThreatDetected,
-            hit.severity,
-            format!("{} detected", hit.name),
-            Some(format!(
-                "Found by {source}: {}",
-                Self::match_description(hit, &verdict.sha256)
-            )),
-            Some(path),
-            pid,
-        );
-        if !self.settings().auto_quarantine {
-            self.unresolved_threats.fetch_add(1, Ordering::Relaxed);
+        let auto = self.settings().auto_quarantine;
+        let detail = Some(format!(
+            "Found by {source}: {}{}",
+            Self::match_description(hit, &verdict.sha256),
+            if auto { "" } else { ". Automatic quarantine is off: decide what to do with it." }
+        ));
+        let title = format!("{} detected", hit.name);
+        if !auto {
+            self.emit_attention(EventKind::ThreatDetected, hit.severity, title, detail, Some(path), pid);
             return;
         }
+        self.emit(EventKind::ThreatDetected, hit.severity, title, detail, Some(path), pid);
         match self.quarantine.isolate(&self.db, path, &verdict.sha256, &hit.name) {
             Ok(item) => {
                 self.emit(
@@ -481,8 +566,7 @@ impl Engine {
                 }
             }
             Err(e) => {
-                self.unresolved_threats.fetch_add(1, Ordering::Relaxed);
-                self.emit(
+                self.emit_attention(
                     EventKind::ScanError,
                     Severity::High,
                     format!("Could not quarantine {}", hit.name),
@@ -576,11 +660,12 @@ impl Engine {
             .unwrap_or_else(|| "Manual.UserQuarantine".into());
         let item = self.quarantine.isolate(&self.db, path, &sha256, &name)?;
         let _ = size;
+        self.db.resolve_path(&path.to_string_lossy());
         self.emit(
             EventKind::ThreatQuarantined,
             Severity::Info,
             format!("{name} moved to quarantine by user"),
-            Some(format!("From File Check. Quarantine id {}", item.id)),
+            Some(format!("Quarantine id {}. You can restore it from Quarantine.", item.id)),
             Some(path),
             None,
         );
@@ -607,12 +692,41 @@ impl Engine {
 
     /// The user reviewed the dashboard alert; clears the "threat detected" state.
     pub fn acknowledge_threats(&self) {
-        self.unresolved_threats.store(0, Ordering::Relaxed);
+        self.db.resolve_all();
+    }
+
+    /// The user dismissed one open item.
+    pub fn resolve_event(&self, id: i64) -> bool {
+        self.db.resolve_event(id)
+    }
+
+    /// "This file is safe": allow-list its content so no detector reports it
+    /// again, and close the open items about it.
+    pub fn allow_file(&self, path: &Path) -> Result<()> {
+        anyhow::ensure!(path.is_file(), "{} no longer exists", path.display());
+        let (sha256, _) =
+            hasher::sha256_file(path, u64::MAX).map_err(|r| anyhow::anyhow!("cannot read the file: {r:?}"))?;
+        self.db.allow_hash(&sha256, "marked safe by user")?;
+        self.db.resolve_path(&path.to_string_lossy());
+        self.emit(
+            EventKind::SettingsChanged,
+            Severity::Medium,
+            "File marked as safe",
+            Some(format!(
+                "This exact file (SHA-256 {sha256}) will not be reported again. A changed copy will be."
+            )),
+            Some(path),
+            None,
+        );
+        Ok(())
     }
 
     // ----- scans -----------------------------------------------------------------
 
     pub fn start_scan(self: &Arc<Self>, kind: ScanKind, paths: Vec<String>) -> Result<u64, String> {
+        if self.is_shutting_down() {
+            return Err("the engine is stopping".into());
+        }
         let mut cancel_slot = lock(&self.scan_cancel);
         if self.scan.is_running() {
             return Err("a scan is already running".into());
@@ -825,6 +939,7 @@ impl Engine {
             s.trusted_apps.push(app);
         }
         self.update_settings(s)?;
+        self.db.resolve_path(path);
         self.emit(
             EventKind::SettingsChanged,
             Severity::Medium,
@@ -882,6 +997,7 @@ impl Engine {
         if self.app_update_running.load(Ordering::Acquire) {
             return Err("an app update check is already running".into());
         }
+        appupdate::reset_failures(self);
         let e = self.clone();
         std::thread::Builder::new()
             .name("app-update".into())
@@ -1005,7 +1121,7 @@ impl Engine {
             }
             *last = Some(Instant::now());
         }
-        self.emit(
+        self.emit_attention(
             EventKind::BehaviorAlert,
             Severity::Critical,
             "Ransomware behaviour: a decoy file was changed",
@@ -1036,7 +1152,7 @@ impl Engine {
         match suspects.first() {
             Some(s) if crate::platform::suspend(s.pid) => {
                 lock(&self.suspended).insert(s.pid, s.image.clone());
-                self.emit(
+                self.emit_attention(
                     EventKind::ProcessSuspended,
                     Severity::Critical,
                     format!(
@@ -1087,7 +1203,7 @@ impl Engine {
                     *last = Some(Instant::now());
                 }
                 let first = samples.first().cloned().unwrap_or_default();
-                e.emit(
+                e.emit_attention(
                     EventKind::BehaviorAlert,
                     Severity::Critical,
                     "Ransomware behaviour: files are being encrypted",
@@ -1110,7 +1226,15 @@ impl Engine {
 
     /// The user's decision on a suspended process.
     pub fn process_action(&self, pid: u32, action: ProcessActionKind) -> Result<String, String> {
-        let image = lock(&self.suspended).remove(&pid);
+        // Only processes this engine froze, in this run: a pid from an old alert may
+        // belong to something else by now, and "terminate any pid as SYSTEM" must
+        // never be a service anyone can call.
+        let Some(image) = lock(&self.suspended).remove(&pid) else {
+            self.db.resolve_pid(pid);
+            return Err("That process is no longer suspended (it ended, or the PC restarted since).".into());
+        };
+        self.db.resolve_pid(pid);
+        let image = Some(image);
         match action {
             ProcessActionKind::Resume => {
                 if !crate::platform::resume(pid) {
@@ -1127,7 +1251,6 @@ impl Engine {
                 Ok("resumed".into())
             }
             ProcessActionKind::Terminate => {
-                let image = image.or_else(|| crate::platform::image_path(pid));
                 if !crate::platform::terminate(pid) {
                     return Err("could not terminate the process (it may have exited)".into());
                 }
@@ -1236,6 +1359,9 @@ impl Engine {
 
     /// Take a snapshot of the system drive now and prune our older ones.
     pub fn create_snapshot(&self) -> Result<Snapshot, String> {
+        if self.is_shutting_down() {
+            return Err("the engine is stopping".into());
+        }
         if self.snapshot_running.swap(true, Ordering::SeqCst) {
             return Err("a snapshot is already being taken".into());
         }
@@ -1411,6 +1537,7 @@ impl Engine {
             return Err(format!("no scheduled task named {name}"));
         }
         realtime::tasks::set_enabled(name, false).map_err(|e| format!("{e:#}"))?;
+        self.db.resolve_path(name);
         self.emit(
             EventKind::PersistenceChange,
             Severity::Info,
@@ -1430,7 +1557,25 @@ impl Engine {
         *lock(&self.devices_in_use) = v;
     }
 
+    /// True while stopping, and for a while after an update installer was
+    /// launched (it is about to stop the service: start nothing new meanwhile).
+    pub fn is_shutting_down(&self) -> bool {
+        self.shutting_down.load(Ordering::SeqCst)
+            || lock(&self.background_paused_until).is_some_and(|t| Instant::now() < t)
+    }
+
+    pub fn begin_shutdown(&self) {
+        self.shutting_down.store(true, Ordering::SeqCst);
+    }
+
+    /// Hold scheduled scans, snapshots and downloads for `d` (time-limited, so a
+    /// failed installer cannot leave them off for good).
+    pub fn pause_background(&self, d: std::time::Duration) {
+        *lock(&self.background_paused_until) = Some(Instant::now() + d);
+    }
+
     pub fn shutdown(&self) {
+        self.begin_shutdown();
         if let Some((stop, handle)) = lock(&self.scheduler).take() {
             stop.store(true, Ordering::Relaxed);
             // The scheduler may be mid-way through a download or rule compile. Give it a
@@ -1483,7 +1628,8 @@ impl Engine {
         if settings.dns_guard && home_network.configured && home_network.dns_filtered == Some(false) {
             reasons.push("DNS is not going through Pi-hole".to_string());
         }
-        let state = if self.unresolved_threats.load(Ordering::Relaxed) > 0 {
+        let (attention_count, open_threats) = self.db.attention_counts();
+        let state = if open_threats > 0 {
             ProtectionState::ThreatDetected
         } else if reasons.is_empty() {
             ProtectionState::Protected
@@ -1513,6 +1659,7 @@ impl Engine {
             hardening: crate::platform::hardening_checks(),
             build: appupdate::build(),
             app_update_status: lock(&self.app_update_status).clone(),
+            attention_count,
             devices_in_use: lock(&self.devices_in_use).clone(),
             last_snapshot: self.last_snapshot(),
             snapshot_error: lock(&self.snapshot_error).clone(),
@@ -2031,6 +2178,65 @@ rule Low_Confidence  { meta: score = 60 strings: $a = "LOW-CONFIDENCE-MARKER" co
             "{titles:?}"
         );
         assert!(suspended, "{titles:?}");
+    }
+
+    #[test]
+    fn open_items_drive_the_state_and_close_when_handled() {
+        let (dir, engine) = engine_with_rules(RULES);
+        let weak = dir.path().join("weak.ps1");
+        std::fs::write(&weak, b"# LOW-CONFIDENCE-MARKER").unwrap();
+        let v = engine.check_file(&weak, None).unwrap();
+        assert!(v.hit.is_some());
+        // A weak match is left in place and becomes one open item ...
+        engine.handle_detection(&weak, &v, None, "test");
+        engine.handle_detection(&weak, &v, None, "test"); // found again by the next scan
+        let open = engine.db.open_attention().unwrap();
+        assert_eq!(open.len(), 1, "a repeat must replace the open item, not add one");
+        assert!(matches!(engine.status().state, ProtectionState::ThreatDetected));
+        assert_eq!(engine.status().attention_count, 1);
+        // ... "It's safe" closes it, clears the state, and stops every detector reporting it.
+        engine.allow_file(&weak).unwrap();
+        assert!(engine.db.open_attention().unwrap().is_empty());
+        assert!(!matches!(engine.status().state, ProtectionState::ThreatDetected));
+        assert!(engine.check_file(&weak, None).unwrap().hit.is_none(), "allowed file still matched by YARA");
+    }
+
+    #[test]
+    fn a_restored_yara_detection_is_not_quarantined_again() {
+        let (dir, engine) = engine_with_rules(RULES);
+        let tool = dir.path().join("tool.ps1");
+        std::fs::write(&tool, b"# HIGH-CONFIDENCE-MARKER").unwrap();
+        let v = engine.check_file(&tool, None).unwrap();
+        engine.handle_detection(&tool, &v, None, "test");
+        assert!(!tool.exists(), "strong match should have been quarantined");
+        let id = engine.db.list_quarantine().unwrap()[0].id.clone();
+        engine.restore_quarantine(&id).unwrap();
+        assert!(tool.exists());
+        assert!(engine.check_file(&tool, None).unwrap().hit.is_none());
+    }
+
+    #[test]
+    fn terminate_is_refused_for_processes_the_engine_did_not_suspend() {
+        let (_dir, engine) = engine_with_rules(RULES);
+        let me = std::process::id();
+        assert!(engine.process_action(me, ProcessActionKind::Terminate).is_err());
+        assert!(engine.process_action(me, ProcessActionKind::Resume).is_err());
+    }
+
+    #[test]
+    fn excluded_files_are_never_remediated() {
+        let (dir, engine) = engine_with_rules(RULES);
+        let tool = dir.path().join("mine").join("tool.ps1");
+        std::fs::create_dir_all(tool.parent().unwrap()).unwrap();
+        std::fs::write(&tool, b"# HIGH-CONFIDENCE-MARKER").unwrap();
+        let v = engine.check_file(&tool, None).unwrap();
+        let mut s = engine.settings();
+        s.exclusions = vec![tool.parent().unwrap().display().to_string()];
+        engine.update_settings(s).unwrap();
+        // e.g. a quick scan feeding a running program's image straight to the detector
+        engine.handle_detection(&tool, &v, None, "quick scan");
+        assert!(tool.exists(), "an excluded file was quarantined");
+        assert!(engine.db.open_attention().unwrap().is_empty());
     }
 
     #[cfg(unix)]

@@ -15,7 +15,7 @@ const NAV: { id: Page; label: string; icon: typeof Shield }[] = [
   { id: "settings", label: "Settings", icon: Settings },
 ];
 
-export function Sidebar({ page, onNavigate, status, connected }: { page: Page; onNavigate: (p: Page) => void; status: EngineStatus | null; connected: boolean }) {
+export function Sidebar({ page, onNavigate, status, connected, attention }: { page: Page; onNavigate: (p: Page) => void; status: EngineStatus | null; connected: boolean; attention: number }) {
   const tone = toneOf(status?.state);
   const dot = !connected ? "bg-slate-500" : tone === "safe" ? "bg-emerald-400 shadow-[0_0_8px_#34d399]" : tone === "danger" ? "bg-rose-400 shadow-[0_0_8px_#fb7185]" : "bg-amber-400 shadow-[0_0_8px_#fbbf24]";
 
@@ -32,19 +32,23 @@ export function Sidebar({ page, onNavigate, status, connected }: { page: Page; o
       <nav className="flex-1 space-y-1 px-3">
         {NAV.map(({ id, label, icon: Icon }) => {
           const active = page === id;
-          const badge = id === "quarantine" && status?.quarantine_count ? status.quarantine_count : null;
+          // Quarantined files are safe where they are: a neutral count. Open decisions are the alert.
+          const count = id === "quarantine" && status?.quarantine_count ? status.quarantine_count : null;
+          const badge = id === "dashboard" && attention > 0 ? attention : null;
           const live = id === "privacy" && (status?.devices_in_use.length ?? 0) > 0;
           return (
             <button
               key={id}
               onClick={() => onNavigate(id)}
+              aria-current={active ? "page" : undefined}
               className={`flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm transition ${
                 active ? "bg-cyan-400/10 text-cyan-300 shadow-[inset_2px_0_0_#22d3ee]" : "text-slate-400 hover:bg-slate-800/50 hover:text-slate-200"
               }`}
             >
               <Icon className="h-4 w-4" />
               <span className="flex-1 text-left">{label}</span>
-              {badge && <span className="rounded-full bg-rose-500/20 px-2 text-xs text-rose-300">{badge}</span>}
+              {badge && <span className="rounded-full bg-amber-400/20 px-2 text-xs text-amber-300" title="Waiting for your decision">{badge}</span>}
+              {count && <span className="rounded-full bg-slate-700/60 px-2 text-xs text-slate-300">{count}</span>}
               {live && <span className="h-2 w-2 rounded-full bg-amber-400 shadow-[0_0_8px_#fbbf24]" title="Camera or microphone in use" />}
             </button>
           );

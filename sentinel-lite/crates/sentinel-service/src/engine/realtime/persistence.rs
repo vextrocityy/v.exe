@@ -52,9 +52,39 @@ fn is_own_entry(value: &str) -> bool {
         .is_some_and(|dir| dir.len() > 3 && value.to_lowercase().contains(&dir))
 }
 
+/// A user's registry hive is only loaded while they are signed in. Keep the
+/// baseline entries of users whose hive is not loaded right now; otherwise every
+/// one of their autostart entries would be "new" again at their next sign-in.
+pub fn carry_unloaded_users(
+    baseline: &HashMap<String, String>,
+    current: &mut HashMap<String, String>,
+    loaded_sids: &[String],
+) {
+    for (k, v) in baseline {
+        let Some(sid) = k.strip_prefix("HKU\\").and_then(|r| r.split('\\').next()) else {
+            continue;
+        };
+        if !loaded_sids.iter().any(|s| s.eq_ignore_ascii_case(sid)) {
+            current.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+    }
+}
+
+fn loaded_user_sids() -> Vec<String> {
+    #[cfg(windows)]
+    {
+        registry::loaded_sids()
+    }
+    #[cfg(not(windows))]
+    {
+        Vec::new()
+    }
+}
+
 fn poll(engine: &Engine, baseline: &mut HashMap<String, String>, first_run: &mut bool) {
     {
-        let current = collect();
+        let mut current = collect();
+        carry_unloaded_users(baseline, &mut current, &loaded_user_sids());
         if !*first_run {
             for (key, value) in &current {
                 if is_own_entry(value) || is_own_entry(key) {
@@ -74,15 +104,22 @@ fn poll(engine: &Engine, baseline: &mut HashMap<String, String>, first_run: &mut
                     report_task(engine, task, value, is_new);
                     tasks::targets(value)
                 } else {
-                    engine.emit(
-                        EventKind::PersistenceChange,
-                        Severity::Medium,
-                        if is_new { "New autostart entry" } else { "Autostart entry modified" },
-                        Some(format!("{key} = {value}")),
-                        None,
-                        None,
-                    );
-                    target_of(key, value).into_iter().collect()
+                    let target = target_of(key, value);
+                    // Signed services change their path with every update (Defender,
+                    // browsers, drivers): scan the new target, but do not alert.
+                    let routine_service = key.contains("\\Services\\")
+                        && target.as_deref().is_some_and(crate::platform::has_valid_signature);
+                    if !routine_service {
+                        engine.emit(
+                            EventKind::PersistenceChange,
+                            Severity::Medium,
+                            if is_new { "New autostart entry" } else { "Autostart entry modified" },
+                            Some(format!("{key} = {value}")),
+                            None,
+                            None,
+                        );
+                    }
+                    target.into_iter().collect()
                 };
                 for target in targets {
                     if let Ok(v) = engine.check_file(&target, None) {
@@ -119,14 +156,13 @@ fn report_task(engine: &Engine, task: &str, value: &str, is_new: bool) {
         detail.push_str(&format!(". Red flags: {}", flags.join("; ")));
     }
     detail.push_str(". If you did not install something that needs this, disable it.");
-    engine.emit(
-        EventKind::PersistenceChange,
-        severity,
-        if is_new { "New scheduled task" } else { "Scheduled task changed" },
-        Some(detail),
-        Some(Path::new(task)),
-        None,
-    );
+    let title = if is_new { "New scheduled task" } else { "Scheduled task changed" };
+    // Only tasks with several red flags ask for a decision; the rest are history.
+    if severity >= Severity::High {
+        engine.emit_attention(EventKind::PersistenceChange, severity, title, Some(detail), Some(Path::new(task)), None);
+    } else {
+        engine.emit(EventKind::PersistenceChange, severity, title, Some(detail), Some(Path::new(task)), None);
+    }
 }
 
 /// Which file does this entry launch?
@@ -462,6 +498,14 @@ mod registry {
         }
     }
 
+    pub fn loaded_sids() -> Vec<String> {
+        RegKey::predef(HKEY_USERS)
+            .enum_keys()
+            .flatten()
+            .filter(|sid| sid.starts_with("S-1-5-21-") && !sid.ends_with("_Classes"))
+            .collect()
+    }
+
     pub fn collect(map: &mut HashMap<String, String>) {
         let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
         for sub in RUN_KEYS {
@@ -502,6 +546,22 @@ mod registry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signed_out_users_keep_their_baseline() {
+        let run = r"HKU\S-1-5-21-1\Software\Microsoft\Windows\CurrentVersion\Run!OneDrive";
+        let other = r"HKU\S-1-5-21-2\Software\Microsoft\Windows\CurrentVersion\Run!Teams";
+        let mut baseline = HashMap::new();
+        baseline.insert(run.to_string(), "onedrive.exe".to_string());
+        baseline.insert(other.to_string(), "teams.exe".to_string());
+        baseline.insert(r"HKLM\Software\X!Y".to_string(), "gone.exe".to_string());
+        // User 1 is signed out, user 2 is signed in and removed their entry.
+        let mut current = HashMap::new();
+        carry_unloaded_users(&baseline, &mut current, &["S-1-5-21-2".to_string()]);
+        assert_eq!(current.get(run).map(String::as_str), Some("onedrive.exe"));
+        assert!(!current.contains_key(other));
+        assert_eq!(current.len(), 1);
+    }
 
     #[test]
     fn extracts_quoted_and_unquoted_paths() {

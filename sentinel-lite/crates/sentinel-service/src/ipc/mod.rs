@@ -39,7 +39,20 @@ async fn write_msg<W: AsyncWrite + Unpin>(w: &mut W, resp: &Response) -> std::io
 
 /// Accept loop. Runs until `shutdown` flips to true.
 pub async fn serve(engine: Arc<Engine>, token: Arc<AuthToken>, mut shutdown: watch::Receiver<bool>) -> Result<()> {
-    let mut listener = transport::Listener::bind()?;
+    // If the pipe name is taken (another program squatting on it while we were
+    // down), keep protecting and keep trying: never let that stop the engine.
+    let mut listener = loop {
+        match transport::Listener::bind() {
+            Ok(l) => break l,
+            Err(e) => {
+                tracing::error!(error = %e, "cannot open the IPC pipe (name in use?); retrying");
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+                    _ = shutdown.changed() => return Ok(()),
+                }
+            }
+        }
+    };
     tracing::info!("IPC listening");
     loop {
         tokio::select! {
@@ -76,7 +89,12 @@ async fn handle<S: Stream>(engine: Arc<Engine>, token: Arc<AuthToken>, mut s: S,
             return Ok(());
         }
         Ok(Ok(Request::Auth { token: t, client })) if token.verify(&t) => {
-            tracing::info!(client, pid = ?peer.pid, image = ?peer.image, elevated = peer.elevated, "client authenticated");
+            // The dashboard connects every few seconds: keep that out of the log.
+            if peer.elevated {
+                tracing::info!(client, pid = ?peer.pid, image = ?peer.image, "elevated client authenticated");
+            } else {
+                tracing::debug!(client, pid = ?peer.pid, image = ?peer.image, "client authenticated");
+            }
             write_msg(
                 &mut s,
                 &Response::AuthOk {
@@ -160,6 +178,31 @@ async fn dispatch(engine: &Arc<Engine>, req: Request, peer: &Peer) -> Response {
         Request::RollbackRestore { .. } if !peer.elevated => {
             return elevation_required("overwrites files with older copies from a snapshot");
         }
+        Request::AllowFile { .. } if !peer.elevated => {
+            return elevation_required("tells Vigil to stop reporting a file it found suspicious");
+        }
+        Request::DeleteQuarantine { .. } if !peer.elevated => {
+            return elevation_required("permanently deletes a quarantined file");
+        }
+        Request::CreateSnapshot if !peer.elevated => {
+            // Each new snapshot pushes the oldest one out: unprivileged callers
+            // must not be able to flush the good ones after an attack.
+            return elevation_required("takes a new snapshot, which replaces the oldest one");
+        }
+        Request::EnableHardening { .. } if !peer.elevated => {
+            return elevation_required("changes a Windows security setting");
+        }
+        Request::RollbackPreview { folders, .. } if !peer.elevated => {
+            // Reads as SYSTEM: keep unprivileged callers to user folders.
+            let profiles = crate::engine::targets::user_profiles();
+            let ok = folders.len() <= 32
+                && folders
+                    .iter()
+                    .all(|f| crate::engine::rollback::allowed(std::path::Path::new(f), &profiles));
+            if !ok {
+                return elevation_required("compares folders outside your user folders with a snapshot");
+            }
+        }
         Request::TrustApp { .. } if !peer.elevated => {
             return elevation_required("lets an unsigned program run from a risky folder");
         }
@@ -184,6 +227,25 @@ async fn dispatch(engine: &Arc<Engine>, req: Request, peer: &Peer) -> Response {
     }
     let e = engine.clone();
     let result = match req {
+        Request::GetAttention => {
+            blocking(move || match e.db.open_attention() {
+                Ok(v) => Response::Events(v),
+                Err(err) => Response::error(ErrorCode::Internal, err.to_string()),
+            })
+            .await
+        }
+        Request::ResolveEvent { id } => blocking(move || {
+            e.resolve_event(id);
+            Response::Ok
+        })
+        .await,
+        Request::AllowFile { path } => {
+            blocking(move || match e.allow_file(std::path::Path::new(&path)) {
+                Ok(()) => Response::Ok,
+                Err(err) => Response::error(ErrorCode::BadRequest, format!("{err:#}")),
+            })
+            .await
+        }
         Request::DisableTask { name } => {
             blocking(move || match e.disable_task(&name) {
                 Ok(()) => Response::Ok,

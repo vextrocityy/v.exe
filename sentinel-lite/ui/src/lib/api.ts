@@ -38,6 +38,11 @@ export const api = {
   rollbackPreview: (snapshotId: string, folders: string[] = []) => invoke<RollbackPreview>("rollback_preview", { snapshotId, folders }),
   /** Needs administrator approval; the outcome is reported as a "recovery" event. */
   rollbackRestore: (snapshotId: string, paths: string[]) => invoke<void>("rollback_restore", { snapshotId, paths }),
+  /** Open items waiting for a decision, newest first. */
+  getAttention: () => invoke<SecurityEvent[]>("get_attention"),
+  resolveEvent: (id: number) => invoke<void>("resolve_event", { id }),
+  /** "This file is safe": never report it again (administrator approval). */
+  allowFile: (path: string) => invoke<void>("allow_file", { path }),
   getEvents: (limit = 100, beforeId?: number) => invoke<SecurityEvent[]>("get_events", { limit, beforeId }),
   listQuarantine: () => invoke<QuarantineItem[]>("list_quarantine"),
   restoreQuarantine: (id: string) => invoke<void>("restore_quarantine", { id }),

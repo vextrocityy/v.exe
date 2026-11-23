@@ -20,6 +20,20 @@ pub struct Quarantine {
     dir: PathBuf,
 }
 
+/// Hashes what is read through it.
+struct HashingReader<R> {
+    inner: R,
+    hasher: sha2::Sha256,
+}
+
+impl<R: Read> Read for HashingReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        sha2::Digest::update(&mut self.hasher, &buf[..n]);
+        Ok(n)
+    }
+}
+
 fn xor_stream(src: &mut impl Read, dst: &mut impl Write, key: &[u8; KEY_LEN]) -> std::io::Result<u64> {
     let mut buf = [0u8; 64 * 1024];
     let mut pos = 0usize;
@@ -95,15 +109,33 @@ impl Quarantine {
         let dest = self.vault_path(&id);
         let tmp = dest.with_extension("tmp");
 
-        let size = {
-            let mut src = BufReader::new(File::open(path).with_context(|| format!("opening {}", path.display()))?);
+        // We run as SYSTEM and are about to copy and delete by path: refuse paths
+        // that go through a link (a swapped-in junction would aim us at another file).
+        if crate::util::has_link_component(path) {
+            bail!("{} is reached through a link; not touching it", path.display());
+        }
+        let (size, copied_hash) = {
+            let mut src = HashingReader {
+                inner: BufReader::new(File::open(path).with_context(|| format!("opening {}", path.display()))?),
+                hasher: Default::default(),
+            };
             let mut out = BufWriter::new(OpenOptions::new().write(true).create_new(true).open(&tmp)?);
             out.write_all(MAGIC)?;
             out.write_all(&key)?;
             let n = xor_stream(&mut src, &mut out, &key)?;
             out.into_inner().map_err(|e| e.into_error())?.sync_all()?;
-            n
+            (n, crate::engine::hasher::to_hex(&sha2::Digest::finalize(src.hasher)))
         };
+        // What we copied must be what was judged: otherwise the file was swapped
+        // after the scan, and deleting "it" would delete something else.
+        if sha256.len() == 64 && !copied_hash.eq_ignore_ascii_case(sha256) {
+            let _ = fs::remove_file(&tmp);
+            bail!("{} changed after it was scanned; left in place", path.display());
+        }
+        if crate::util::has_link_component(path) {
+            let _ = fs::remove_file(&tmp);
+            bail!("{} is reached through a link; not touching it", path.display());
+        }
         fs::rename(&tmp, &dest)?;
 
         make_writable(path);
@@ -189,7 +221,7 @@ mod tests {
         let victim = tmp.path().join("bad.exe");
         fs::write(&victim, b"MZ pretend payload").unwrap();
 
-        let item = q.isolate(&db, &victim, &"b".repeat(64), "Test.Threat").unwrap();
+        let item = q.isolate(&db, &victim, &crate::engine::hasher::sha256_file(&victim, u64::MAX).unwrap().0, "Test.Threat").unwrap();
         assert!(!victim.exists());
         let stored = fs::read(q.vault_path(&item.id)).unwrap();
         assert!(
@@ -211,7 +243,7 @@ mod tests {
         let q = Quarantine::new(tmp.path().join("vault")).unwrap();
         let victim = tmp.path().join("bad.bin");
         fs::write(&victim, b"x").unwrap();
-        let item = q.isolate(&db, &victim, &"c".repeat(64), "T").unwrap();
+        let item = q.isolate(&db, &victim, &crate::engine::hasher::sha256_file(&victim, u64::MAX).unwrap().0, "T").unwrap();
         q.delete(&db, &item.id).unwrap();
         assert!(!q.vault_path(&item.id).exists());
         assert!(q.delete(&db, &item.id).is_err());

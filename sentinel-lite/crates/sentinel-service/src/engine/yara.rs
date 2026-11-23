@@ -166,11 +166,14 @@ pub fn rule_dirs(paths: &crate::engine::AppPaths) -> Vec<PathBuf> {
     if let Some(dir) = crate::platform::install_dir() {
         dirs.push(dir.join("rules"));
     }
-    if let Some(extra) = std::env::var_os("SENTINEL_RULES") {
-        dirs.push(PathBuf::from(extra));
+    // Dev / test runs only (the service is not in its protected install folder):
+    // an installed service must never load rules from a path a user could create.
+    if !crate::platform::installed() {
+        if let Some(extra) = std::env::var_os("SENTINEL_RULES") {
+            dirs.push(PathBuf::from(extra));
+        }
+        dirs.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../rules"));
     }
-    // Dev convenience: `cargo run` from the workspace.
-    dirs.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../rules"));
     dirs.sort();
     dirs.dedup();
     dirs

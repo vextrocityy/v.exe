@@ -170,6 +170,21 @@ Data lives in `%ProgramData%\SentinelLite\` (`sentinel.db`, `quarantine\`, `sign
     or apps running from Downloads / Temp / AppData). **Privacy** shows what is in use now and the
     full history.
 
+### Needs your attention
+
+Events that wait for a decision (a suspicious file left in place, a frozen process, a blocked
+program, a risky scheduled task, a failed quarantine) are *open items*: they are listed on the
+Dashboard with their buttons (**Quarantine it**, **It's safe**, **Always allow**, **Disable this
+task**, **Dismiss**) and drive the status. Acting on one closes it; a repeat of the same alert
+about the same file replaces the open one instead of piling up. Everything else is history in
+Activity. **It's safe** allow-lists the file's SHA-256 for every detector (hash lists, YARA,
+archive scanning), as does restoring from quarantine. Weak rule matches on programs Windows
+vouches for (valid signature, system file, Store app) are recorded as information only.
+
+If the engine is not running, the dashboard says **Protection is off** (never a stale
+"Protected"), shows **Start protection**, and after 45 seconds raises a notification and changes
+the tray tooltip even when the window is hidden.
+
 ### File Check
 
 Drop files or folders onto **File Check** in the dashboard (or click *Choose files…*), or run
@@ -216,6 +231,18 @@ A restored file's hash is allow-listed.
 catch genuinely novel malware that no rule describes, or malware that only exists in memory.
 
 ## Security model
+
+Hardening added by the November 2026 audit: requests that could be abused by a program running
+as the signed-in user now need administrator approval or are refused (terminating a process is
+only possible for processes the engine itself suspended; taking a snapshot, deleting a
+quarantined item, enabling a Windows hardening switch and comparing folders outside the user
+profiles with a snapshot need elevation). Quarantine and rollback refuse paths that pass through
+a symbolic link or junction, and quarantine verifies that the bytes it moved are the bytes that
+were judged. An installed service no longer loads rules or signature packs from build-time or
+environment-variable paths. Known gaps: the data folder's owner is not verified at start-up, the
+dashboard does not authenticate the pipe server, and File Check / custom scans read files as
+SYSTEM on behalf of an unelevated caller.
+
 
 | Control | Implementation |
 |---|---|

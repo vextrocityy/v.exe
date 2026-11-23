@@ -12,27 +12,45 @@
 !define OLD_DIR "$PROGRAMFILES64\Sentinel-Lite"
 
 !macro NSIS_HOOK_PREINSTALL
-  ; Upgrade: stop the running engine so its executable can be replaced.
-  IfFileExists "$INSTDIR\sentinel-service.exe" 0 +3
-    nsExec::ExecToLog '"$INSTDIR\sentinel-service.exe" stop'
-    Sleep 2000 ; let the old process exit and release its files
-  ; Migration: the engine may still be running from the old Sentinel-Lite folder.
-  IfFileExists "${OLD_DIR}\sentinel-service.exe" 0 +3
-    nsExec::ExecToLog '"${OLD_DIR}\sentinel-service.exe" stop'
-    Sleep 2000
-  ; Close a running dashboard (new and old name).
+  ; Close a running dashboard (new and old name) FIRST and let it go: the
+  ; installer's own "is the app running?" check comes right after this hook and
+  ; aborts a silent install if it still sees it. Protection must not be stopped
+  ; before the last step that can abort.
   nsExec::ExecToLog 'taskkill /IM vigil.exe /F'
+  Pop $0
   nsExec::ExecToLog 'taskkill /IM sentinel-lite.exe /F'
+  Pop $0
+  Sleep 1500
+  ; Upgrade: stop the running engine so its executable can be replaced.
+  ; ("stop" waits until the process has really exited and released its files.)
+  IfFileExists "$INSTDIR\sentinel-service.exe" 0 vigil_no_current
+    nsExec::ExecToLog '"$INSTDIR\sentinel-service.exe" stop'
+    Pop $0
+    Sleep 1000
+  vigil_no_current:
+  ; Migration: the engine may still be running from the old Sentinel-Lite folder.
+  IfFileExists "${OLD_DIR}\sentinel-service.exe" 0 vigil_no_old
+    nsExec::ExecToLog '"${OLD_DIR}\sentinel-service.exe" stop'
+    Pop $0
+    Sleep 2000
+  vigil_no_old:
 !macroend
 
 !macro NSIS_HOOK_POSTINSTALL
   ; Install (or reconfigure: points an existing service at this folder) and start it; idempotent.
   nsExec::ExecToLog '"$INSTDIR\sentinel-service.exe" install'
   Pop $0
-  StrCmp $0 "0" +2
+  StrCmp $0 "0" vigil_service_ok
+  ; Once more after a pause (the old process, or a scanner looking at the new
+  ; file, may have been in the way).
+  Sleep 5000
+  nsExec::ExecToLog '"$INSTDIR\sentinel-service.exe" install'
+  Pop $0
+  StrCmp $0 "0" vigil_service_ok
     ; /SD: silent installs (self-updates run by the SYSTEM service on an invisible
     ; desktop) must never wait for a click that cannot happen.
     MessageBox MB_ICONEXCLAMATION "The Vigil protection service could not be started (code $0). Protection is NOT active. See %ProgramData%\SentinelLite\logs." /SD IDOK
+  vigil_service_ok:
   ; Start the dashboard in the tray at every login.
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "Vigil" '"$INSTDIR\vigil.exe" --minimized'
   ; Remove what the old Sentinel-Lite install left behind.

@@ -192,7 +192,10 @@ pub fn inspect_file(engine: &Engine, path: &Path) -> FileReport {
             });
         }
     }
-    if let Some(rules) = engine.yara.rules() {
+    // A file the user marked as safe (or restored from quarantine) is exempt
+    // from every detector, here as everywhere else; the report says so.
+    let allowed = sha256.as_deref().is_some_and(|h| engine.db.is_allowed(h));
+    if let Some(rules) = engine.yara.rules().filter(|_| !allowed) {
         if size <= settings.yara_max_file_mb.saturating_mul(1024 * 1024) {
             if let Ok(mut matches) = yara::scan_file(&rules, path) {
                 matches.sort_by_key(|m| std::cmp::Reverse(m.score));
@@ -205,7 +208,7 @@ pub fn inspect_file(engine: &Engine, path: &Path) -> FileReport {
             }
         }
     }
-    if archive::kind_of_file(path).is_some() {
+    if archive::kind_of_file(path).is_some() && !allowed {
         if let Some(sha) = &sha256 {
             if let Some(hit) = engine.archive_check(path, sha, size) {
                 detections.push(Detection {
@@ -247,6 +250,11 @@ pub fn inspect_file(engine: &Engine, path: &Path) -> FileReport {
         (
             Verdict::NoThreats,
             "Too large to hash; YARA and name checks found nothing.".into(),
+        )
+    } else if allowed {
+        (
+            Verdict::NoThreats,
+            "You marked this exact file as safe, so detection rules are not applied to it.".into(),
         )
     } else if signed == Some(true) {
         (

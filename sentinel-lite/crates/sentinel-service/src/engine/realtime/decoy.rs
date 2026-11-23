@@ -99,7 +99,10 @@ impl Decoys {
         Some(match std::fs::read(&d.path) {
             Ok(bytes) if hasher::sha256_bytes(&bytes) == d.sha256 => State::Intact,
             Ok(_) => State::Modified,
-            Err(_) => State::Missing,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => State::Missing,
+            // Held open by a sync or backup tool, or access denied: that is not an
+            // attack. Unknown is treated as untouched; the next event re-checks.
+            Err(_) => State::Intact,
         })
     }
 
@@ -120,10 +123,8 @@ impl Decoys {
         let mut planted = 0;
         for profile in profiles {
             for (sub, name) in PLAN {
-                let dir = profile.join(sub);
-                if !dir.is_dir() {
-                    continue;
-                }
+              // The real folder may be under OneDrive (folder backup): plant in each.
+              for dir in crate::engine::targets::personal_folders(profile, sub) {
                 let path = dir.join(name);
                 let ours = self.is_decoy(&path);
                 if path.exists() && !ours {
@@ -148,6 +149,7 @@ impl Decoys {
                     }
                     Err(e) => tracing::debug!(path = %path.display(), error = %e, "cannot plant decoy"),
                 }
+              }
             }
         }
         self.save(db);

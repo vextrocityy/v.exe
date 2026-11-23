@@ -106,7 +106,10 @@ fn walk(engine: &Engine, roots: &[PathBuf], tx: &SyncSender<PathBuf>, cancel: &A
             return;
         }
         if dir.is_file() {
-            // A custom scan may target a single file.
+            // A custom scan may target a single file; quick scans add running programs.
+            if engine.is_excluded(&dir) || engine.is_decoy(&dir) {
+                continue;
+            }
             if tx.send(dir).is_err() {
                 return;
             }

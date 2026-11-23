@@ -7,8 +7,12 @@ use sentinel_protocol::Request;
 use std::path::PathBuf;
 
 fn service_exe() -> Result<PathBuf, String> {
-    if let Some(p) = std::env::var_os("SENTINEL_SERVICE_EXE") {
-        return Ok(PathBuf::from(p)); // dev builds
+    // Dev builds only: in a release build an environment variable must never
+    // decide which program the administrator prompt elevates.
+    if cfg!(debug_assertions) {
+        if let Some(p) = std::env::var_os("SENTINEL_SERVICE_EXE") {
+            return Ok(PathBuf::from(p));
+        }
     }
     let exe_name = if cfg!(windows) {
         "sentinel-service.exe"
@@ -31,11 +35,22 @@ fn to_hex(b: &[u8]) -> String {
 
 /// Run `req` elevated. Blocks until the user answers the UAC prompt and the request completes.
 pub fn run(req: &Request) -> Result<(), String> {
-    let payload = to_hex(&serde_json::to_vec(req).map_err(|e| e.to_string())?);
-    if payload.len() > 30_000 {
-        return Err("request too large to elevate".into());
+    let json = serde_json::to_vec(req).map_err(|e| e.to_string())?;
+    let payload = to_hex(&json);
+    if payload.len() <= 30_000 {
+        return platform::run_elevated(&service_exe()?, &format!("elevated-request {payload}"));
     }
-    platform::run_elevated(&service_exe()?, &format!("elevated-request {payload}"))
+    // Too long for a command line (e.g. restoring thousands of files): hand the
+    // helper a file instead. It deletes the file after reading it.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let file = std::env::temp_dir().join(format!("vigil-request-{}-{nanos}.json", std::process::id()));
+    std::fs::write(&file, &json).map_err(|e| format!("could not prepare the request: {e}"))?;
+    let result = platform::run_elevated(&service_exe()?, &format!("elevated-request \"@{}\"", file.display()));
+    let _ = std::fs::remove_file(&file);
+    result
 }
 
 /// Start the protection service (UAC prompt): `sentinel-service.exe start`.
@@ -78,14 +93,18 @@ mod platform {
             if info.hProcess.is_null() {
                 return Err("elevated helper did not start".into());
             }
-            WaitForSingleObject(info.hProcess, 120_000);
+            // No time limit: a large restore takes as long as it takes, and giving
+            // up early would report a failure while it is still working.
+            WaitForSingleObject(info.hProcess, u32::MAX);
             let mut code = 1u32;
             GetExitCodeProcess(info.hProcess, &mut code);
             CloseHandle(info.hProcess);
             if code == 0 {
                 Ok(())
             } else {
-                Err("The protected change was rejected by the service.".into())
+                Err("The change could not be completed. Open Activity for details, or check that Vigil's \
+                     protection service is running."
+                    .into())
             }
         }
     }

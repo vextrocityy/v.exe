@@ -201,11 +201,23 @@ fn handle_start(engine: &Engine, images: &mut HashMap<u32, PathBuf>, ev: &Proces
     // 4) Execution Guard: unsigned programs from Downloads / Temp / AppData.
     if settings.block_untrusted_risky {
         if let Some(folder) = heuristics::risky_location(&image) {
-            let trusted = image_sha
+            // check_file skips very large files: hash fully here so "Always allow"
+            // also works for a 400 MB installer.
+            let sha = image_sha.clone().or_else(|| {
+                crate::engine::hasher::sha256_file(&image, u64::MAX).ok().map(|(h, _)| h)
+            });
+            let parent_trusted = || {
+                // A trusted installer unpacks and runs helpers from Temp: let them run.
+                parent.as_deref().is_some_and(|p| {
+                    crate::engine::hasher::sha256_file(p, u64::MAX).is_ok_and(|(h, _)| engine.is_trusted_app(&h))
+                })
+            };
+            let trusted = sha
                 .as_deref()
-                .is_some_and(|h| engine.is_trusted_app(h) || engine.is_own_uninstaller(h));
+                .is_some_and(|h| engine.is_trusted_app(h) || engine.is_own_uninstaller(h))
+                || parent_trusted();
             if !trusted && engine.may_suspend(ev.pid, &image) && platform::terminate(ev.pid) {
-                engine.emit(
+                engine.emit_attention(
                     EventKind::ProcessBlocked,
                     Severity::High,
                     format!("Blocked unsigned program from {folder}"),

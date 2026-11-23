@@ -6,13 +6,14 @@ import { api } from "../lib/api";
 import { formatBytes, timeAgo } from "../lib/format";
 import type { QuarantineItem } from "../lib/types";
 
-export function QuarantinePage({ onChanged }: { onChanged: () => void }) {
+export function QuarantinePage({ onChanged, count }: { onChanged: () => void; count?: number }) {
   const [items, setItems] = useState<QuarantineItem[]>([]);
   const [confirm, setConfirm] = useState<{ item: QuarantineItem; action: "restore" | "delete" } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(() => api.listQuarantine().then(setItems).catch((e) => setError(String(e))), []);
-  useEffect(() => { load(); }, [load]);
+  // Re-read when the engine's count changes (something was quarantined meanwhile) or it comes back.
+  useEffect(() => { load(); }, [load, count]);
 
   const act = async () => {
     if (!confirm) return;
@@ -32,7 +33,7 @@ export function QuarantinePage({ onChanged }: { onChanged: () => void }) {
     <>
       <Panel title={`Quarantine · ${items.length} item(s)`}>
         {error && <p className="border-b border-slate-800 px-5 py-2 text-sm text-rose-400">{error}</p>}
-        {items.length === 0 ? (
+        {error && items.length === 0 ? null : items.length === 0 ? (
           <div className="flex flex-col items-center gap-2 py-16 text-slate-500">
             <ShieldCheck className="h-10 w-10 text-emerald-500/60" />
             <p className="text-sm">The vault is empty. No isolated threats.</p>

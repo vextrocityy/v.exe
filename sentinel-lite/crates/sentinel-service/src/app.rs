@@ -43,11 +43,14 @@ fn signature_dirs(paths: &AppPaths) -> Vec<PathBuf> {
     {
         dirs.push(exe_dir.join("signatures"));
     }
-    if let Some(extra) = std::env::var_os("SENTINEL_SIGNATURES") {
-        dirs.push(PathBuf::from(extra));
+    // Dev / test runs only: an installed service must never load signature packs
+    // (which can make it quarantine things) from a path a user could create.
+    if !crate::platform::installed() {
+        if let Some(extra) = std::env::var_os("SENTINEL_SIGNATURES") {
+            dirs.push(PathBuf::from(extra));
+        }
+        dirs.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../signatures"));
     }
-    // Dev convenience: `cargo run` from the workspace.
-    dirs.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../signatures"));
     dirs
 }
 

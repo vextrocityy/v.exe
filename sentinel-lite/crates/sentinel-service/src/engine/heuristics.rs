@@ -244,6 +244,9 @@ pub fn is_churn_location(p: &Path) -> bool {
         "\\appdata\\local\\microsoft\\edge\\user data\\",
         "\\appdata\\local\\mozilla\\firefox\\profiles\\",
         "\\appdata\\local\\crashdumps\\",
+        // Version control writes temp objects and renames them into place by the hundred.
+        "\\.git\\",
+        "\\node_modules\\",
     ]
     .iter()
     .any(|frag| s.contains(frag))
@@ -280,7 +283,10 @@ pub fn counts_for_ransomware(path: &Path, activity: FileActivity, fresh: &FreshF
     if is_churn_location(path) {
         return false;
     }
-    !(activity == FileActivity::Modified && fresh.is_fresh(path, now))
+    // Anything done to a file that did not exist a minute ago (written, or saved as
+    // a temp file and renamed into place) is not ransomware: that rewrites old files.
+    let _ = activity;
+    !fresh.is_fresh(path, now)
 }
 
 pub struct RansomwareDetector {
@@ -406,7 +412,16 @@ mod tests {
         // Rewriting or renaming an existing document always counts.
         let doc = Path::new(r"C:\Users\cranc\Documents\taxes.xlsx");
         assert!(counts_for_ransomware(doc, FileActivity::Modified, &fresh, now));
-        assert!(counts_for_ransomware(new, FileActivity::RenamedNewExtension, &fresh, now));
+        // Save-via-temp-and-rename of a fresh file is not counted either ...
+        assert!(!counts_for_ransomware(new, FileActivity::RenamedNewExtension, &fresh, now));
+        // ... but renaming an old document to a new extension is.
+        assert!(counts_for_ransomware(doc, FileActivity::RenamedNewExtension, &fresh, now));
+        assert!(!counts_for_ransomware(
+            Path::new(r"C:\Users\cranc\Documents\repo\.git\objects\ab\cdef"),
+            FileActivity::Renamed,
+            &fresh,
+            now
+        ));
     }
 
     #[test]

@@ -36,9 +36,7 @@ pub fn default_api() -> String {
 }
 
 fn is_loopback(url: &str) -> bool {
-    let rest = url.split("://").nth(1).unwrap_or("");
-    let host = rest.split(['/', ':']).next().unwrap_or("");
-    url.starts_with("http://") && (host == "127.0.0.1" || host.eq_ignore_ascii_case("localhost"))
+    crate::util::is_loopback_url(url)
 }
 
 /// Release lookups may only go to GitHub's API (or a loopback test server).
@@ -218,6 +216,15 @@ pub fn check_and_install(engine: &Engine) -> Result<String> {
     if rel.build <= ours {
         return Ok(format!("Up to date (build {ours})"));
     }
+    // Each attempt stops protection for a moment: do not keep retrying a build
+    // that will not install on this PC.
+    if engine.db.counter(FAILED_BUILD) == rel.build && engine.db.counter(FAIL_COUNT) >= MAX_ATTEMPTS {
+        return Ok(format!(
+            "Build {} failed to install {MAX_ATTEMPTS} times; not retrying automatically. \
+             Press Check now to try again, or run the installer from the Releases page.",
+            rel.build
+        ));
+    }
     let installer = download_verified(&rel, &updates_dir(engine))?;
     let pending = Pending {
         from_build: ours,
@@ -237,7 +244,7 @@ pub fn check_and_install(engine: &Engine) -> Result<String> {
         Some(&installer),
         None,
     );
-    if let Err(e) = crate::platform::arm_update_watchdog() {
+    if let Err(e) = crate::platform::arm_update_watchdog(&updates_dir(engine)) {
         tracing::warn!(error = %format!("{e:#}"), "could not arm the update watchdog");
     }
     if let Err(e) = crate::platform::run_installer_detached(&installer) {
@@ -245,7 +252,54 @@ pub fn check_and_install(engine: &Engine) -> Result<String> {
         let _ = std::fs::remove_file(marker(engine));
         return Err(e);
     }
+    // The installer stops this service within seconds: start nothing heavy meanwhile.
+    engine.pause_background(std::time::Duration::from_secs(600));
     Ok(format!("Installing build {}…", rel.build))
+}
+
+const FAILED_BUILD: &str = "update_failed_build";
+const FAIL_COUNT: &str = "update_fail_count";
+const MAX_ATTEMPTS: u64 = 3;
+
+fn record_failure(engine: &Engine, build: u64) {
+    let n = if engine.db.counter(FAILED_BUILD) == build { engine.db.counter(FAIL_COUNT) + 1 } else { 1 };
+    engine.db.set_counter(FAILED_BUILD, build as i64);
+    engine.db.set_counter(FAIL_COUNT, n as i64);
+}
+
+/// The user asked for an update explicitly: forget earlier failures.
+pub fn reset_failures(engine: &Engine) {
+    engine.db.set_counter(FAIL_COUNT, 0);
+}
+
+/// An installer was launched but, 15 minutes later, this same service is still
+/// running: it never got as far as stopping us (blocked, or it aborted early).
+/// Clear the "installing" state and the watchdog task.
+pub fn expire_stale(engine: &Engine) {
+    let path = marker(engine);
+    let Ok(raw) = std::fs::read(&path) else { return };
+    let Ok(p) = serde_json::from_slice::<Pending>(&raw) else {
+        let _ = std::fs::remove_file(&path);
+        return;
+    };
+    if now_unix() - p.started_at < 15 * 60 {
+        return;
+    }
+    let _ = std::fs::remove_file(&path);
+    crate::platform::disarm_update_watchdog();
+    record_failure(engine, p.to_build);
+    engine.emit(
+        EventKind::ServiceInfo,
+        Severity::Medium,
+        format!("Update to build {} did not start", p.to_build),
+        Some(
+            "The installer was launched but never ran (another security product may have blocked it). \
+             Protection was not interrupted. You can install the update by hand from the Releases page."
+                .into(),
+        ),
+        None,
+        None,
+    );
 }
 
 /// On service start: report the outcome of an update and restore the dashboard.
@@ -258,6 +312,7 @@ pub fn finish_pending(engine: &Engine) {
     };
     let ours = build();
     if ours >= p.to_build {
+        engine.db.set_counter(FAIL_COUNT, 0);
         engine.emit(
             EventKind::ServiceInfo,
             Severity::Info,
@@ -267,13 +322,20 @@ pub fn finish_pending(engine: &Engine) {
             None,
         );
     } else {
+        record_failure(engine, p.to_build);
+        let attempts = engine.db.counter(FAIL_COUNT);
         engine.emit(
             EventKind::ServiceInfo,
             Severity::Medium,
             format!("Update to build {} did not complete", p.to_build),
-            Some(format!(
-                "Still running build {ours}. It will be retried at the next check."
-            )),
+            Some(if attempts >= MAX_ATTEMPTS {
+                format!(
+                    "Still running build {ours}. That was attempt {attempts}; it will not be retried \
+                     automatically. Install it by hand from the Releases page."
+                )
+            } else {
+                format!("Still running build {ours}. It will be retried at the next check (attempt {attempts}).")
+            }),
             None,
             None,
         );

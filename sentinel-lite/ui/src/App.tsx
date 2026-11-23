@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Sidebar, type Page } from "./components/Sidebar";
 import { useEngine } from "./hooks/useEngine";
 import { api, isTauri } from "./lib/api";
@@ -22,12 +22,13 @@ const TITLES: Record<Page, string> = {
 
 export default function App() {
   const [page, setPage] = useState<Page>("dashboard");
-  const { status, events, error, refresh } = useEngine();
+  const { status, events, attention, error, refresh } = useEngine();
   const connected = !!status && !error;
+  const openIds = useMemo(() => new Set(attention.map((e) => e.id)), [attention]);
 
   return (
     <div className="flex h-full">
-      <Sidebar page={page} onNavigate={setPage} status={status} connected={connected} />
+      <Sidebar page={page} onNavigate={setPage} status={status} connected={connected} attention={attention.length} />
       <main className="flex-1 overflow-y-auto">
         <header className="flex items-center justify-between px-8 pt-7 pb-5">
           <h1 className="text-xl font-semibold tracking-tight text-slate-100">{TITLES[page]}</h1>
@@ -35,13 +36,15 @@ export default function App() {
         </header>
         {error && <ServiceError error={error} onStarted={refresh} />}
         <div className="px-8 pb-8">
-          {page === "dashboard" && <Dashboard status={status} events={events} refresh={refresh} onSeeAll={() => setPage("activity")} onOpenSettings={() => setPage("settings")} />}
+          {page === "dashboard" && (
+            <Dashboard status={status} events={events} attention={attention} offline={!!error} refresh={refresh} onSeeAll={() => setPage("activity")} onNavigate={setPage} onOpenSettings={() => setPage("settings")} />
+          )}
           {page === "filecheck" && <FileCheckPage />}
-          {page === "activity" && <ActivityPage events={events} networkBlock={!!status?.home_network?.configured} />}
+          {page === "activity" && <ActivityPage events={events} openIds={openIds} onChanged={refresh} networkBlock={!!status?.home_network?.configured} />}
           {page === "privacy" && <PrivacyPage status={status} />}
           {page === "recovery" && <RecoveryPage status={status} events={events} refresh={refresh} />}
-          {page === "quarantine" && <QuarantinePage onChanged={refresh} />}
-          {page === "settings" && <SettingsPage />}
+          {page === "quarantine" && <QuarantinePage onChanged={refresh} count={status?.quarantine_count} />}
+          {page === "settings" && <SettingsPage status={status} />}
         </div>
       </main>
     </div>

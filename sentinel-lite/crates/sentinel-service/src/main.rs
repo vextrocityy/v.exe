@@ -240,13 +240,24 @@ fn main() -> Result<()> {
         }
         Some("elevated-request") => elevated_request(args.get(1).map(String::as_str).unwrap_or("")),
         #[cfg(windows)]
-        Some("install") => service::install(),
-        #[cfg(windows)]
-        Some("uninstall") => service::uninstall(),
-        #[cfg(windows)]
-        Some("start") => service::start(),
-        #[cfg(windows)]
-        Some("stop") => service::stop(),
+        Some(cmd @ ("install" | "uninstall" | "start" | "stop")) => {
+            let result = match cmd {
+                "install" => service::install(),
+                "uninstall" => service::uninstall(),
+                "start" => service::start(),
+                _ => service::stop(),
+            };
+            // Installers run these silently: keep a record, or failures are undiagnosable.
+            let line = match &result {
+                Ok(()) => format!("{} {cmd}: ok (build {})\n", database::now_unix(), engine::appupdate::build()),
+                Err(e) => format!("{} {cmd}: FAILED: {e:#} (build {})\n", database::now_unix(), engine::appupdate::build()),
+            };
+            let _ = std::fs::create_dir_all(&paths.logs);
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(paths.logs.join("install.log")) {
+                let _ = std::io::Write::write_all(&mut f, line.as_bytes());
+            }
+            result
+        }
         Some(other) => bail!("unknown command: {other}"),
     }
 }
@@ -254,11 +265,22 @@ fn main() -> Result<()> {
 /// Run on behalf of the dashboard after the user approved a UAC prompt: this
 /// process is elevated and lives in the install directory, so the service
 /// accepts protection-weakening requests from it. Only those requests are allowed.
-fn elevated_request(hex: &str) -> Result<()> {
+fn elevated_request(arg: &str) -> Result<()> {
     use sentinel_protocol::{Request, Response};
-    let raw = util::from_hex(hex)
-        .filter(|b| b.len() <= 64 * 1024)
-        .ok_or_else(|| anyhow::anyhow!("bad request encoding"))?;
+    // Large requests (restoring thousands of files) do not fit on a command
+    // line: `@<file>` reads the JSON from a file and removes it.
+    let raw = match arg.strip_prefix('@') {
+        Some(file) => {
+            let meta = std::fs::metadata(file)?;
+            anyhow::ensure!(meta.is_file() && meta.len() <= 4 * 1024 * 1024, "bad request file");
+            let bytes = std::fs::read(file)?;
+            let _ = std::fs::remove_file(file);
+            bytes
+        }
+        None => util::from_hex(arg)
+            .filter(|b| b.len() <= 64 * 1024)
+            .ok_or_else(|| anyhow::anyhow!("bad request encoding"))?,
+    };
     let req: Request = serde_json::from_slice(&raw)?;
     if !matches!(
         req,
@@ -270,6 +292,9 @@ fn elevated_request(hex: &str) -> Result<()> {
             | Request::EnableHardening { .. }
             | Request::DisableTask { .. }
             | Request::RollbackRestore { .. }
+            | Request::AllowFile { .. }
+            | Request::DeleteQuarantine { .. }
+            | Request::CreateSnapshot
     ) {
         bail!("request type not allowed");
     }

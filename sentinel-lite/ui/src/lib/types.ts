@@ -50,6 +50,7 @@ export interface EngineStatus {
   hardening: HardeningCheck[];
   build: number;
   app_update_status: string | null;
+  attention_count: number;
   devices_in_use: DeviceUse[];
   last_snapshot: number | null;
   snapshot_error: string | null;
@@ -165,6 +166,8 @@ export interface SecurityEvent {
   detail: string | null;
   path: string | null;
   pid: number | null;
+  /** Open item: waiting for the user's decision. */
+  attention: boolean;
 }
 
 export interface QuarantineItem {

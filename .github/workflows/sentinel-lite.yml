@@ -11,6 +11,16 @@ defaults:
   run:
     working-directory: sentinel-lite
 
+# Read-only token by default; only the release job may write.
+permissions:
+  contents: read
+
+# One run at a time per branch, in order: a slower older run must never publish
+# "latest" after a newer one.
+concurrency:
+  group: sentinel-lite-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   engine:
     name: Engine (test + Windows smoke test)
@@ -178,6 +188,9 @@ jobs:
           if ((Get-Service SentinelLite).Status -ne "Running") { throw "service not running after self-update" }
           if ((Get-Process sentinel-service).StartTime -le $before) { throw "service was not restarted by the update" }
           if (Get-ScheduledTask -TaskName VigilUpdateWatchdog -ErrorAction SilentlyContinue) { throw "update watchdog task left behind after a successful update" }
+          $log = Get-Content "$env:ProgramData\SentinelLite\logs\service.log" -Raw
+          if ($log -notmatch "update watchdog armed \(xml\)") { throw "the update watchdog was not registered from its XML definition" }
+          "install log:"; Get-Content "$env:ProgramData\SentinelLite\logs\install.log" -ErrorAction SilentlyContinue | Out-Host
           "Self-update OK: downloaded, SHA-256 verified, installed silently, service restarted"
           # (The test reuses the same installer, so the restarted service correctly reports it is
           #  still build $build: the mechanism, not a version change, is what is verified here.)

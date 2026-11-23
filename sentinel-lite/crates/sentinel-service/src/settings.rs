@@ -109,7 +109,7 @@ pub fn merge_secrets(old: &Settings, mut new: Settings) -> Settings {
 /// Updates must come over HTTPS (plain HTTP only for a local mirror / tests).
 pub fn is_allowed_update_url(u: &str) -> bool {
     let lower = u.to_ascii_lowercase();
-    lower.starts_with("https://") || lower.starts_with("http://127.0.0.1") || lower.starts_with("http://localhost")
+    lower.starts_with("https://") || crate::util::is_loopback_url(&lower)
 }
 
 /// Describe every way `new` reduces protection compared with `old`.
@@ -181,6 +181,24 @@ pub fn weakenings(old: &Settings, new: &Settings) -> Vec<String> {
     }
     if old.dns_guard && new.dns_test_domain != old.dns_test_domain {
         out.push("changes the DNS test domain".into());
+    }
+    if new.persistence_poll_secs > old.persistence_poll_secs.max(60) {
+        out.push("makes the startup-change check much slower".into());
+    }
+    if new.update_interval_hours > old.update_interval_hours.max(24) {
+        out.push("makes signature updates rarer".into());
+    }
+    if new.rollback_interval_hours > old.rollback_interval_hours.max(24) {
+        out.push("makes rollback snapshots rarer".into());
+    }
+    if new.scheduled_scan_hours > old.scheduled_scan_hours.max(24 * 7) {
+        out.push("makes scheduled scans rarer".into());
+    }
+    if new.update_url != old.update_url {
+        out.push("changes where signature updates come from".into());
+    }
+    if old.abusech_auth_key.is_some() && new.abusech_auth_key != old.abusech_auth_key {
+        out.push("replaces the community-feed key".into());
     }
     let removed_watch = old.watch_paths.iter().any(|w| !new.watch_paths.contains(w));
     if removed_watch {

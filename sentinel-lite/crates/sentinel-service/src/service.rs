@@ -73,6 +73,11 @@ fn run_service() -> Result<()> {
     let result = rt.block_on(app::run(paths, async {
         let _ = rx.await;
     }));
+    // Do not report "stopped" while this process can linger: a request still
+    // running on the blocking pool (a snapshot listing waiting on VSS, a scan
+    // report) would keep the executable locked, and an installer that sees
+    // "stopped" would then fail to replace it. Abandon such work after 2 s.
+    rt.shutdown_timeout(Duration::from_secs(2));
 
     let code = if result.is_ok() { 0 } else { 1 };
     handle.set_service_status(status(ServiceState::Stopped, ServiceControlAccept::empty(), code))?;
@@ -115,10 +120,7 @@ pub fn install() -> Result<()> {
         ServiceAccess::QUERY_STATUS | ServiceAccess::CHANGE_CONFIG | ServiceAccess::START | ServiceAccess::STOP;
     let service = match manager.open_service(SERVICE_NAME, access) {
         Ok(existing) => {
-            if existing.query_status()?.current_state != ServiceState::Stopped {
-                let _ = existing.stop();
-                wait_for(&existing, ServiceState::Stopped)?;
-            }
+            stop_and_wait(&existing)?;
             existing.change_config(&info)?;
             existing
         }
@@ -155,19 +157,41 @@ pub fn install() -> Result<()> {
 
 pub fn start() -> Result<()> {
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
-    let service = manager.open_service(SERVICE_NAME, ServiceAccess::QUERY_STATUS | ServiceAccess::START)?;
+    let service = match manager.open_service(SERVICE_NAME, ServiceAccess::QUERY_STATUS | ServiceAccess::START) {
+        Ok(s) => s,
+        // Registration gone (a failed uninstall / update): put it back.
+        Err(_) => return install(),
+    };
+    if service.query_status()?.current_state == ServiceState::Running {
+        return Ok(());
+    }
     service.start::<&str>(&[])?;
     wait_for(&service, ServiceState::Running)
+}
+
+/// Stop the service and wait until its *process* is gone (the SCM says
+/// "stopped" slightly before the process exits and releases its files).
+fn stop_and_wait(service: &windows_service::service::Service) -> Result<()> {
+    let before = service.query_status()?;
+    if before.current_state == ServiceState::Stopped {
+        return Ok(());
+    }
+    let pid = before.process_id;
+    let _ = service.stop();
+    wait_for(service, ServiceState::Stopped)?;
+    if let Some(pid) = pid {
+        if !crate::platform::wait_for_exit(pid, 15_000) {
+            crate::platform::terminate(pid);
+            crate::platform::wait_for_exit(pid, 5_000);
+        }
+    }
+    Ok(())
 }
 
 pub fn stop() -> Result<()> {
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
     let service = manager.open_service(SERVICE_NAME, ServiceAccess::QUERY_STATUS | ServiceAccess::STOP)?;
-    if service.query_status()?.current_state != ServiceState::Stopped {
-        service.stop()?;
-        wait_for(&service, ServiceState::Stopped)?;
-    }
-    Ok(())
+    stop_and_wait(&service)
 }
 
 pub fn uninstall() -> Result<()> {

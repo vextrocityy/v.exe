@@ -238,8 +238,7 @@ pub fn default_folders(profiles: &[PathBuf]) -> Vec<PathBuf> {
     const NAMES: &[&str] = &["Desktop", "Documents", "Pictures", "Music", "Videos", "Downloads"];
     profiles
         .iter()
-        .flat_map(|p| NAMES.iter().map(move |n| p.join(n)))
-        .filter(|p| p.is_dir())
+        .flat_map(|p| NAMES.iter().flat_map(move |n| super::targets::personal_folders(p, n)))
         .collect()
 }
 
@@ -266,10 +265,22 @@ pub fn restore_file(snap: &Path, live: &Path, backup: Option<&Path>) -> std::io:
     if !snap.is_file() {
         return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "not in the snapshot"));
     }
+    // We write as SYSTEM into folders the user (or malware running as the user)
+    // controls: never follow a link out of them.
+    let linked = |p: &Path| crate::util::has_link_component(p);
+    if linked(live) {
+        return Err(std::io::Error::other("the path goes through a link"));
+    }
     if live.exists() {
         let backup = backup.ok_or_else(|| std::io::Error::other("no backup location"))?;
         if let Some(dir) = backup.parent() {
+            if linked(dir) {
+                return Err(std::io::Error::other("the backup folder goes through a link"));
+            }
             std::fs::create_dir_all(dir)?;
+            if linked(dir) {
+                return Err(std::io::Error::other("the backup folder goes through a link"));
+            }
         }
         std::fs::rename(live, backup).or_else(|_| {
             std::fs::copy(live, backup)?;
@@ -409,8 +420,20 @@ pub fn delete(id: &str) -> anyhow::Result<()> {
     }
 }
 
+/// `2026-11-09T14:32:05Z`.
+pub fn iso_utc(unix: i64) -> String {
+    let (y, m, d, secs) = civil(unix);
+    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", secs / 3600, (secs % 3600) / 60, secs % 60)
+}
+
 /// `2026-11-09 1432` (UTC) for backup folder names.
 pub fn stamp(unix: i64) -> String {
+    let (y, m, d, secs) = civil(unix);
+    format!("{y:04}-{m:02}-{d:02} {:02}{:02} UTC", secs / 3600, (secs % 3600) / 60)
+}
+
+/// (year, month, day, seconds into the day), UTC.
+fn civil(unix: i64) -> (i64, i64, i64, i64) {
     let days = unix.div_euclid(86_400);
     let secs = unix.rem_euclid(86_400);
     // Civil-from-days (Howard Hinnant).
@@ -423,7 +446,7 @@ pub fn stamp(unix: i64) -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = yoe + era * 400 + i64::from(m <= 2);
-    format!("{y:04}-{m:02}-{d:02} {:02}{:02} UTC", secs / 3600, (secs % 3600) / 60)
+    (y, m, d, secs)
 }
 
 /// The system drive, `C:\` on almost every PC.
@@ -440,6 +463,10 @@ mod tests {
     #[test]
     fn stamps_read_as_dates() {
         assert_eq!(stamp(1_704_067_200), "2024-01-01 0000 UTC");
+        assert_eq!(iso_utc(1_762_660_445), "2025-11-09T03:54:05Z");
+        let xml = crate::platform::watchdog_task_xml(1_762_660_445);
+        assert!(xml.contains("<StartBoundary>2025-11-09T03:54:05Z</StartBoundary>"));
+        assert!(xml.contains("<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>"));
         assert_eq!(stamp(1_762_660_440), "2025-11-09 0354 UTC");
     }
 

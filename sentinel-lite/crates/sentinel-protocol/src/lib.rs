@@ -12,7 +12,7 @@ pub const PIPE_NAME: &str = r"\\.\pipe\sentinel_lite_ipc";
 /// Hard upper bound on one frame; protects the service from memory exhaustion.
 pub const MAX_FRAME_BYTES: u32 = 4 * 1024 * 1024;
 /// Bumped on any incompatible change; the UI refuses to talk to a different version.
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 /// Placeholder sent instead of stored secrets; sending it back means "unchanged".
 pub const SECRET_MASK: &str = "********";
 
@@ -116,6 +116,9 @@ pub struct EngineStatus {
     /// Camera / microphone sessions open right now.
     #[serde(default)]
     pub devices_in_use: Vec<DeviceUse>,
+    /// Open items waiting for the user's decision.
+    #[serde(default)]
+    pub attention_count: u64,
     /// Unix time of the newest rollback snapshot, if any.
     #[serde(default)]
     pub last_snapshot: Option<i64>,
@@ -307,6 +310,10 @@ pub struct SecurityEvent {
     pub detail: Option<String>,
     pub path: Option<String>,
     pub pid: Option<u32>,
+    /// Open item: waiting for the user's decision (quarantine, allow, dismiss…).
+    /// Cleared when the user acts on it; everything else is history.
+    #[serde(default)]
+    pub attention: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -519,6 +526,17 @@ pub enum Request {
     RollbackRestore {
         snapshot_id: String,
         paths: Vec<String>,
+    },
+    /// Open items that need the user's decision, newest first.
+    GetAttention,
+    /// Mark one open item as handled ("dismiss").
+    ResolveEvent {
+        id: i64,
+    },
+    /// "This file is safe": allow-list its content hash so it is never reported
+    /// again, and close the alerts about it (needs elevation).
+    AllowFile {
+        path: String,
     },
     GetEvents {
         limit: u32,
