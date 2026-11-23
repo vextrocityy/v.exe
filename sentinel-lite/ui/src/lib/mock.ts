@@ -68,7 +68,7 @@ const mockChanges: FileChange[] = [
   { path: "C:\\Users\\alex\\Documents\\CV.docx", change: "deleted", size_then: 120_331, size_now: null, modified_at: null, looks_encrypted: false },
   { path: "C:\\Users\\alex\\Documents\\notes.txt", change: "modified", size_then: 2_100, size_now: 2_310, modified_at: now() - 3000, looks_encrypted: false },
 ];
-let appUpdate: string | null = "Up to date (build 14)";
+let appUpdate: string | null = "Up to date (v0.2, build 14)";
 let lastUpdate = now() - 3 * 3600;
 let updating = false;
 
@@ -113,7 +113,7 @@ function push(e: Omit<SecurityEvent, "id" | "timestamp" | "attention">) {
 function status(): EngineStatus {
   return {
     protocol_version: 1,
-    service_version: "0.1.0-mock",
+    service_version: "0.2.0",
     state: !settings.realtime_protection
       ? { at_risk: { reasons: ["Real-time protection is turned off"] } }
       : events.some((e) => e.attention && ["threat_detected", "process_suspended", "behavior_alert", "scan_error"].includes(e.kind))
@@ -223,7 +223,7 @@ export const mock = {
           return undefined;
         case "check_app_update":
           appUpdate = "Checking for app updates…";
-          setTimeout(() => (appUpdate = "Up to date (build 14)"), 1200);
+          setTimeout(() => (appUpdate = "Up to date (v0.2, build 14)"), 1200);
           return undefined;
         case "enable_hardening":
           lsaOn = true;

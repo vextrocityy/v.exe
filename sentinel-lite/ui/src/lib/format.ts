@@ -10,6 +10,13 @@ export function formatBytes(n: number | null | undefined): string {
   return `${v.toFixed(v >= 100 || i === 0 ? 0 : 1)} ${units[i]}`;
 }
 
+/** "0.2.0" → "v0.2"; "0.2.1" → "v0.2.1". The build number stays the precise identity. */
+export function versionLabel(semver: string): string {
+  const parts = semver.split(".");
+  if (parts.length === 3 && parts[2] === "0") parts.pop();
+  return `v${parts.join(".")}`;
+}
+
 export function formatNumber(n: number): string {
   return new Intl.NumberFormat().format(n);
 }

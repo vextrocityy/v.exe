@@ -1,7 +1,7 @@
 import { Activity, Eye, FileSearch, History, LayoutDashboard, Lock, Settings, Shield } from "lucide-react";
 import type { EngineStatus } from "../lib/types";
 import { toneOf } from "../lib/types";
-import { formatBytes } from "../lib/format";
+import { formatBytes, versionLabel } from "../lib/format";
 
 export type Page = "dashboard" | "filecheck" | "activity" | "privacy" | "recovery" | "quarantine" | "settings";
 
@@ -62,7 +62,7 @@ export function Sidebar({ page, onNavigate, status, connected, attention }: { pa
         </div>
         {status && (
           <p className="font-mono">
-            v{status.service_version}{status.build ? ` build ${status.build}` : " dev"} · {formatBytes(status.memory_bytes)} RAM
+            {versionLabel(status.service_version)}{status.build ? "" : " dev"} · {formatBytes(status.memory_bytes)} RAM
           </p>
         )}
       </div>

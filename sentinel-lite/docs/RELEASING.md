@@ -99,3 +99,19 @@ To release build N to every install: GitHub > Actions > **sentinel-lite** > *Run
 `promote_build` = N. The job checks that the build exists with its installer and checksums and is
 newer than the current release, then marks it as the latest release. Installs pick it up within
 6 hours (or at once with Settings > Check now).
+
+## Version numbers
+
+People see a version such as **v0.2** (in the app, release names and the installer's file name).
+It is set by hand in three places that must agree: `Cargo.toml` (`[workspace.package] version`),
+`ui/package.json` and `ui/src-tauri/tauri.conf.json` (then `cargo check` and commit `Cargo.lock`
+and `ui/package-lock.json`). Raise the middle number for a release with new features (0.2.0 →
+0.3.0, shown as v0.3) and the last one for fixes only (0.2.1, shown as v0.2.1).
+
+The **build number** (CI run number) stays the exact identity of a build: release tags are
+`sentinel-lite-build-N`, and installs decide whether to update by comparing build numbers, never
+versions. Do not rename the tags: every installed copy looks for that prefix.
+
+Every release also carries the installer under the fixed name `Vigil-setup.exe`, so
+`https://github.com/vextrocityy/v.exe/releases/latest/download/Vigil-setup.exe` always downloads
+the current release.

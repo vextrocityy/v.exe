@@ -105,7 +105,8 @@ fn main() -> Result<()> {
         }
         Some("version") => {
             println!(
-                "sentinel-service {} build {}",
+                "Vigil {} ({}) build {}",
+                engine::appupdate::our_version(),
                 env!("CARGO_PKG_VERSION"),
                 engine::appupdate::build()
             );

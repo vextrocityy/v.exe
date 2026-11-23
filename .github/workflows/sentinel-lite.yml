@@ -193,13 +193,13 @@ jobs:
             Start-Sleep 3
             try {
               $ev = (& $svc events 30 | Out-String | ConvertFrom-Json).data
-              $done = [bool]($ev | Where-Object { $_.title -like "Updated to build*" -or $_.title -like "Update to build $next did not complete*" })
+              $done = [bool]($ev | Where-Object { $_.title -like "Updated to *" -or $_.title -like "Update to build $next did not complete*" })
             } catch { }
           }
           Stop-Job $server; Remove-Job $server -Force
           if (-not $done) { throw "self-update did not complete (no post-update event)" }
           $ev | Select-Object -First 6 | Format-Table severity, title -AutoSize | Out-Host
-          if (-not ($ev | Where-Object { $_.title -eq "Installing Vigil build $next" })) { throw "updater never started the installer" }
+          if (-not ($ev | Where-Object { $_.title -like "Installing Vigil*build $next*" })) { throw "updater never started the installer" }
           if ((Get-Service SentinelLite).Status -ne "Running") { throw "service not running after self-update" }
           if ((Get-Process sentinel-service).StartTime -le $before) { throw "service was not restarted by the update" }
           if (Get-ScheduledTask -TaskName VigilUpdateWatchdog -ErrorAction SilentlyContinue) { throw "update watchdog task left behind after a successful update" }
@@ -249,6 +249,13 @@ jobs:
         id: meta
         run: |
           cd dist
+          # v0.2 from Vigil_0.2.0_x64-setup.exe (v0.2.1 for a fix release).
+          installer=$(ls Vigil_*-setup.exe | head -n1)
+          semver=$(echo "$installer" | cut -d_ -f2)
+          echo "version=v${semver%.0}" >> "$GITHUB_OUTPUT"
+          # A copy under a name that never changes, for a permanent download link:
+          # .../releases/latest/download/Vigil-setup.exe
+          cp "$installer" Vigil-setup.exe
           sha256sum *.exe > SHA256SUMS.txt
           cat SHA256SUMS.txt
           echo "tag=sentinel-lite-build-${{ github.run_number }}" >> "$GITHUB_OUTPUT"
@@ -274,7 +281,7 @@ jobs:
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
           target_commitish: ${{ github.sha }}
-          name: Vigil build ${{ github.run_number }} (test)
+          name: Vigil ${{ steps.meta.outputs.version }} (build ${{ github.run_number }}, test)
           body_path: notes.md
           prerelease: true
           make_latest: false
@@ -308,5 +315,8 @@ jobs:
           latest_n=${latest#sentinel-lite-build-}
           case "$latest_n" in ''|*[!0-9]*) latest_n=0;; esac
           if [ "$BUILD" -le "$latest_n" ]; then echo "::error::build $BUILD is not newer than the released build $latest_n"; exit 1; fi
-          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --prerelease=false --latest --title "Vigil build $BUILD"
+          semver=$(echo "$assets" | grep -- '^Vigil_.*-setup\.exe$' | head -n1 | cut -d_ -f2)
+          title="Vigil build $BUILD"
+          if [ -n "$semver" ]; then title="Vigil v${semver%.0} (build $BUILD)"; fi
+          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --prerelease=false --latest --title "$title"
           echo "Released build $BUILD: installs update to it within 6 hours."

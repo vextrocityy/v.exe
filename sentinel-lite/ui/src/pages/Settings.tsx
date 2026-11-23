@@ -3,6 +3,7 @@ import { ChevronDown, Plus, ShieldAlert, X } from "lucide-react";
 import { Panel } from "../components/Panel";
 import { Toggle } from "../components/Toggle";
 import { api } from "../lib/api";
+import { versionLabel } from "../lib/format";
 import type { EngineStatus, Settings } from "../lib/types";
 
 type BoolKey = { [K in keyof Settings]: Settings[K] extends boolean ? K : never }[keyof Settings];
@@ -36,7 +37,7 @@ function AppUpdateRow({ s, set, status }: { s: Settings; set: Setter; status: En
         <div>
           <p className="text-sm text-slate-200">App version</p>
           <p className="text-xs text-slate-500">
-            {!status ? "Unknown (engine not running)" : status.build ? `Build ${status.build}` : "Development build"}
+            {!status ? "Unknown (engine not running)" : status.build ? `${versionLabel(status.service_version)} (build ${status.build})` : `${versionLabel(status.service_version)} development build`}
             {err ? ` · ${err}` : line ? ` · ${line}` : ""}
           </p>
         </div>

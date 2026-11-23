@@ -31,6 +31,36 @@ pub fn build() -> u64 {
         .unwrap_or(0)
 }
 
+/// The version people see: `v0.2`, or `v0.2.1` for a fix release. The build
+/// number stays the precise identity (and what updates are compared by).
+pub fn version_label(semver: &str) -> String {
+    let mut parts: Vec<&str> = semver.split('.').collect();
+    if parts.len() == 3 && parts[2] == "0" {
+        parts.pop();
+    }
+    format!("v{}", parts.join("."))
+}
+
+/// This build's label, e.g. `v0.2`.
+pub fn our_version() -> String {
+    version_label(env!("CARGO_PKG_VERSION"))
+}
+
+/// `Vigil_0.3.0_x64-setup.exe` → `v0.3`. None when the name carries no version.
+pub fn label_from_installer(name: &str) -> Option<String> {
+    let v = name.split('_').nth(1)?;
+    let ok = v.split('.').count() >= 2 && v.split('.').all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+    ok.then(|| version_label(v))
+}
+
+/// `v0.3 (build 41)`, or `build 41` when the version is unknown.
+fn describe(installer_name: &str, build: u64) -> String {
+    match label_from_installer(installer_name) {
+        Some(v) => format!("{v} (build {build})"),
+        None => format!("build {build}"),
+    }
+}
+
 pub fn default_api() -> String {
     format!("https://api.github.com/repos/{REPO}/releases/latest")
 }
@@ -85,10 +115,18 @@ pub fn parse_release(json: &[u8], api: &str) -> Result<Release> {
         .strip_prefix(TAG_PREFIX)
         .and_then(|n| n.parse().ok())
         .with_context(|| format!("release tag {} is not a Vigil build", r.tag_name))?;
-    let installer = r
+    // Prefer the installer whose name carries the version (releases also ship a
+    // copy under the fixed name Vigil-setup.exe for a permanent download link).
+    let installers: Vec<&ApiAsset> = r
         .assets
         .iter()
-        .find(|a| a.name.to_ascii_lowercase().ends_with("-setup.exe"))
+        .filter(|a| a.name.to_ascii_lowercase().ends_with("-setup.exe"))
+        .collect();
+    let installer = installers
+        .iter()
+        .find(|a| label_from_installer(&a.name).is_some())
+        .or(installers.first())
+        .copied()
         .context("release has no installer")?;
     let sums = r
         .assets
@@ -214,7 +252,7 @@ pub fn check_and_install(engine: &Engine) -> Result<String> {
     }
     let rel = fetch_latest(&api)?;
     if rel.build <= ours {
-        return Ok(format!("Up to date (build {ours})"));
+        return Ok(format!("Up to date ({}, build {ours})", our_version()));
     }
     // Each attempt stops protection for a moment: do not keep retrying a build
     // that will not install on this PC.
@@ -236,7 +274,7 @@ pub fn check_and_install(engine: &Engine) -> Result<String> {
     engine.emit(
         EventKind::ServiceInfo,
         Severity::Info,
-        format!("Installing Vigil build {}", rel.build),
+        format!("Installing Vigil {}", describe(&rel.installer_name, rel.build)),
         Some(format!(
             "Downloaded and verified {} (SHA-256). Protection restarts in a few seconds.",
             rel.installer_name
@@ -254,7 +292,7 @@ pub fn check_and_install(engine: &Engine) -> Result<String> {
     }
     // The installer stops this service within seconds: start nothing heavy meanwhile.
     engine.pause_background(std::time::Duration::from_secs(600));
-    Ok(format!("Installing build {}…", rel.build))
+    Ok(format!("Installing {}…", describe(&rel.installer_name, rel.build)))
 }
 
 const FAILED_BUILD: &str = "update_failed_build";
@@ -316,7 +354,7 @@ pub fn finish_pending(engine: &Engine) {
         engine.emit(
             EventKind::ServiceInfo,
             Severity::Info,
-            format!("Updated to build {ours}"),
+            format!("Updated to {} (build {ours})", our_version()),
             Some(format!("Vigil updated itself from build {}.", p.from_build)),
             None,
             None,
@@ -357,6 +395,31 @@ pub fn finish_pending(engine: &Engine) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn versions_read_the_way_people_say_them() {
+        assert_eq!(version_label("0.2.0"), "v0.2");
+        assert_eq!(version_label("0.2.1"), "v0.2.1");
+        assert_eq!(version_label("1.0.0"), "v1.0");
+        assert_eq!(label_from_installer("Vigil_0.3.0_x64-setup.exe").as_deref(), Some("v0.3"));
+        assert_eq!(label_from_installer("Vigil-setup.exe"), None);
+        assert_eq!(label_from_installer("Vigil_x64_en-setup.exe"), None);
+        assert_eq!(describe("Vigil_0.3.0_x64-setup.exe", 41), "v0.3 (build 41)");
+        assert_eq!(describe("Vigil-setup.exe", 41), "build 41");
+    }
+
+    #[test]
+    fn prefers_the_versioned_installer_over_the_fixed_name_copy() {
+        let base = "https://github.com/vextrocityy/v.exe/releases/download/sentinel-lite-build-50";
+        let json = format!(
+            r#"{{"tag_name":"sentinel-lite-build-50","draft":false,"prerelease":false,"assets":[
+              {{"name":"Vigil-setup.exe","browser_download_url":"{base}/Vigil-setup.exe"}},
+              {{"name":"Vigil_0.3.0_x64-setup.exe","browser_download_url":"{base}/Vigil_0.3.0_x64-setup.exe"}},
+              {{"name":"SHA256SUMS.txt","browser_download_url":"{base}/SHA256SUMS.txt"}}]}}"#
+        );
+        let r = parse_release(json.as_bytes(), &default_api()).unwrap();
+        assert_eq!(r.installer_name, "Vigil_0.3.0_x64-setup.exe");
+    }
 
     #[test]
     fn finds_the_latest_release_from_the_website() {
