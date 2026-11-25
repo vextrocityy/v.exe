@@ -1747,7 +1747,11 @@ impl Engine {
             st.save(&self.mail_file())?;
             Ok((st, access, ttl))
         };
-        let (st, access, ttl) = run().map_err(|e| format!("{e:#}"))?;
+        let (st, access, ttl) = run().map_err(|e| {
+            let msg = format!("{e:#}");
+            tracing::warn!(error = %msg, "connecting Gmail failed");
+            msg
+        })?;
         {
             let mut m = lock(&self.mail);
             m.access = Some((access, Instant::now() + std::time::Duration::from_secs(ttl.saturating_sub(120))));

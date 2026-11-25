@@ -33,12 +33,39 @@ async fn call_privileged(req: Request) -> Result<Option<Response>, String> {
             code: Some(ErrorCode::ElevationRequired),
             ..
         }) => {
-            tauri::async_runtime::spawn_blocking(move || elevate::run(&req))
+            let outcome = tauri::async_runtime::spawn_blocking(move || elevate::run(&req))
                 .await
-                .map_err(|e| e.to_string())??;
-            Ok(None)
+                .map_err(|e| e.to_string())?;
+            match outcome {
+                Ok(()) => Ok(None),
+                // The helper runs behind the UAC prompt and cannot pass its error
+                // text back; the engine recorded the reason as an event. Use it.
+                Err(generic) => Err(approved_change_error().await.unwrap_or(generic)),
+            }
         }
         Err(e) => Err(e.message),
+    }
+}
+
+/// The engine's reason for refusing the request the user just approved, if it
+/// recorded one in the last minute.
+async fn approved_change_error() -> Option<String> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs() as i64;
+    match call(Request::GetEvents {
+        limit: 10,
+        before_id: None,
+    })
+    .await
+    .ok()?
+    {
+        Response::Events(events) => events
+            .into_iter()
+            .find(|e| e.title == APPROVED_CHANGE_FAILED && now - e.timestamp <= 60)
+            .and_then(|e| e.detail),
+        _ => None,
     }
 }
 

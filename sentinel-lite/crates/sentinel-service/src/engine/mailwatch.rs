@@ -180,6 +180,12 @@ fn token_request(ep: &Endpoints, form: &[(&str, &str)]) -> Result<Value> {
             if msg.starts_with("invalid_grant") {
                 bail!("Google no longer accepts Vigil's access (it expired or was revoked). Connect Gmail again.");
             }
+            if msg.starts_with("invalid_client") || msg.starts_with("unauthorized_client") {
+                bail!(
+                    "Google did not accept the client ID / secret ({msg}). Copy both again from your OAuth client \
+                     in Google Cloud (type \"Desktop app\"), save, and connect again."
+                );
+            }
             bail!("Google refused the sign-in ({msg})")
         }
         Err(e) => bail!("could not reach Google: {e}"),
@@ -211,7 +217,8 @@ pub fn exchange_code(
     let granted = v["scope"].as_str().unwrap_or(SCOPE);
     anyhow::ensure!(
         granted.split(' ').any(|s| s == SCOPE),
-        "read access to Gmail was not ticked on Google's consent page"
+        "Google did not grant read access to Gmail. On Google's page, tick \"View your email messages and settings\" \
+         before pressing Continue, then connect again."
     );
     let access = v["access_token"].as_str().context("no access token in Google's answer")?;
     Ok((refresh.to_string(), access.to_string(), v["expires_in"].as_u64().unwrap_or(3000)))
@@ -240,7 +247,20 @@ fn api_get(ep: &Endpoints, access: &str, path: &str) -> Result<Value> {
     {
         Ok(r) => Ok(serde_json::from_str(&r.into_string()?)?),
         Err(ureq::Error::Status(code, r)) => {
-            bail!("Gmail answered {code} ({})", oauth_error(&r.into_string().unwrap_or_default()))
+            let body = r.into_string().unwrap_or_default();
+            if code == 403 && (body.contains("has not been used in project") || body.contains("is disabled")) {
+                bail!(
+                    "The Gmail API is not switched on in your Google Cloud project. In Google Cloud: APIs & Services > \
+                     Library > Gmail API > Enable. Wait a minute, then press Connect Gmail again."
+                );
+            }
+            if code == 403 && body.contains("insufficient") {
+                bail!(
+                    "Google did not grant read access to Gmail. On Google's page, tick \"View your email messages and \
+                     settings\" before pressing Continue, then connect again."
+                );
+            }
+            bail!("Gmail answered {code} ({})", oauth_error(&body))
         }
         Err(e) => bail!("could not reach Gmail: {e}"),
     }
@@ -769,6 +789,13 @@ mod tests {
         assert!(err.contains("Connect Gmail again"), "{err}");
 
         assert_eq!(fetch_address(&ep, "at2").unwrap(), "conner@example.com");
+        // The common setup mistakes come back as instructions, not status codes.
+        let off = crate::engine::homenet::tests::fake_pihole(|_, _| {
+            (403, json!({"error": {"code": 403, "status": "PERMISSION_DENIED",
+                "message": "Gmail API has not been used in project 622 before or it is disabled."}}).to_string())
+        });
+        let err = fetch_address(&Endpoints { token: String::new(), api: off }, "at").unwrap_err().to_string();
+        assert!(err.contains("Gmail API is not switched on"), "{err}");
         let cfg = fetch_config(&ep, "at2").unwrap();
         assert!(filter_is_dangerous(cfg.filters.iter().next().unwrap()));
         let ids = list_candidates(&ep, "at2").unwrap();

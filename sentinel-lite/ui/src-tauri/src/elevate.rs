@@ -102,9 +102,7 @@ mod platform {
             if code == 0 {
                 Ok(())
             } else {
-                Err("The change could not be completed. Open Activity for details, or check that Vigil's \
-                     protection service is running."
-                    .into())
+                Err("The change could not be completed. Check that Vigil's protection service is running.".into())
             }
         }
     }

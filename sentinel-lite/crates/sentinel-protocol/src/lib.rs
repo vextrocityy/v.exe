@@ -13,6 +13,10 @@ pub const PIPE_NAME: &str = r"\\.\pipe\sentinel_lite_ipc";
 pub const MAX_FRAME_BYTES: u32 = 4 * 1024 * 1024;
 /// Bumped on any incompatible change; the UI refuses to talk to a different version.
 pub const PROTOCOL_VERSION: u32 = 10;
+/// Title of the event the engine records when a request from the elevated
+/// helper fails. The helper cannot hand its error text back to the dashboard
+/// (it runs behind a UAC prompt), so the dashboard reads it from this event.
+pub const APPROVED_CHANGE_FAILED: &str = "A change you approved could not be completed";
 /// Placeholder sent instead of stored secrets; sending it back means "unchanged".
 pub const SECRET_MASK: &str = "********";
 

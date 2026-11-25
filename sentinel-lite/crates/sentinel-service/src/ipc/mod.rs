@@ -129,6 +129,22 @@ async fn handle<S: Stream>(engine: Arc<Engine>, token: Arc<AuthToken>, mut s: S,
             return stream_events(engine.subscribe(), s).await;
         }
         let resp = dispatch(&engine, req, &peer).await;
+        // The elevated helper has no way to show its error to the user: record
+        // it, so the dashboard (and Activity) can say what actually went wrong.
+        if peer.elevated {
+            if let Response::Error { code, message } = &resp {
+                if !matches!(code, ErrorCode::ElevationRequired | ErrorCode::Unauthorized | ErrorCode::Forbidden) {
+                    engine.emit(
+                        sentinel_protocol::EventKind::ServiceInfo,
+                        sentinel_protocol::Severity::Low,
+                        sentinel_protocol::APPROVED_CHANGE_FAILED,
+                        Some(message.clone()),
+                        None,
+                        None,
+                    );
+                }
+            }
+        }
         write_msg(&mut s, &resp).await?;
     }
 }
