@@ -105,6 +105,11 @@ fn tick(engine: &Arc<Engine>) {
     }
     engine.db.prune_scan_cache(400_000);
 
+    if s.mail_watch && now - counter("last_mail_check") >= crate::engine::mailwatch::CHECK_SECS {
+        engine.db.set_counter("last_mail_check", now);
+        engine.check_mail(); // returns at once when no mailbox is connected
+    }
+
     if s.pihole_url.is_some() && now - counter("last_home_check") >= HOME_CHECK_SECS {
         engine.db.set_counter("last_home_check", now);
         engine.check_home_network();

@@ -47,10 +47,14 @@ const settings: Settings = {
   pihole_url: "http://192.168.88.6",
   pihole_password: "********",
   dns_guard: true,
+  mail_watch: true,
+  gmail_client_id: null,
+  gmail_client_secret: null,
   dns_test_domain: "doubleclick.net",
   trusted_apps: [{ path: "C:\\Users\\alex\\Downloads\\tools\\putty.exe", sha256: "9f".repeat(32) }],
 };
 let lsaOn = false;
+let mailConnected = false;
 const devices: DeviceUse[] = [
   { device: "camera", app: "Zoom.exe", path: "C:\\Users\\alex\\AppData\\Roaming\\Zoom\\bin\\Zoom.exe", user: "S-1-5-21-1", in_use: true, last_started: now() - 420, last_stopped: null },
   { device: "microphone", app: "Zoom.exe", path: "C:\\Users\\alex\\AppData\\Roaming\\Zoom\\bin\\Zoom.exe", user: "S-1-5-21-1", in_use: true, last_started: now() - 420, last_stopped: null },
@@ -143,6 +147,7 @@ function status(): EngineStatus {
     network_blocked_ranges: settings.network_guard ? 1489 : 0,
     build: 14,
     app_update_status: appUpdate,
+    mail_watch: { configured: !!settings.gmail_client_id && !!settings.gmail_client_secret, connected: mailConnected, email: mailConnected ? "conner@example.com" : null, error: null, last_check: mailConnected ? now() - 120 : null, alerts_today: mailConnected ? 1 : 0 },
     attention_count: events.filter((e) => e.attention).length,
     devices_in_use: settings.privacy_monitor ? devices.filter((d) => d.in_use) : [],
     last_snapshot: snapshots.filter((s) => s.ours)[0]?.created_at ?? null,
@@ -257,6 +262,13 @@ export const mock = {
           push({ kind: "recovery", severity: "info", title: `Restored ${paths.length} file(s) from the snapshot`, detail: "The versions they replaced were moved to C:\\Users\\alex\\Vigil Restore Backup.", path: null, pid: null });
           return undefined;
         }
+        case "gmail_connect":
+          mailConnected = true;
+          push({ kind: "account_alert", severity: "info", title: "Watching conner@example.com for account takeovers", detail: "Read-only access; message bodies are never read.", path: null, pid: null });
+          return undefined;
+        case "gmail_disconnect":
+          mailConnected = false;
+          return undefined;
         case "get_attention": return events.filter((e) => e.attention);
         case "resolve_event": {
           const ev = events.find((e) => e.id === args.id);

@@ -185,6 +185,30 @@ If the engine is not running, the dashboard says **Protection is off** (never a 
 "Protected"), shows **Start protection**, and after 45 seconds raises a notification and changes
 the tray tooltip even when the window is hidden.
 
+### Email account watch (Gmail)
+
+A takeover of your online accounts shows in your mailbox, and the first thing an intruder does
+inside a mailbox is hide the evidence. With your consent (Google OAuth, **read-only** scope
+`gmail.readonly`) the engine checks every 5 minutes:
+
+- **Security emails**: new-device sign-ins, password resets, "your password / email was changed",
+  judged by sender and subject only. Message bodies are never requested. Each becomes an open
+  item ("LinkedIn: sign-in from a new device"); one found in Trash or Spam is rated higher,
+  because something put it there. Routine sign-in codes are logged quietly. Alerts from three or
+  more services within an hour are reported as one critical event.
+- **Mailbox settings** against a stored baseline: a new filter that deletes, hides or forwards
+  mail, a new forwarding address, forward-everything being switched on, a new send-as address.
+
+Setup is in Settings > Email account watch: you create your own free Google Cloud project and
+OAuth client (type "Desktop app"), paste its ID and secret, and press **Connect Gmail**. The
+dashboard opens Google's consent page and listens on a one-shot loopback port for the answer; the
+engine does the PKCE exchange and keeps the refresh token in the data folder (SYSTEM and
+administrators only). Connecting and disconnecting need administrator approval, because they
+decide which mailbox is watched. Vigil cannot send, delete or change anything, cannot see who is
+signed in to the Google account, and can be revoked at myaccount.google.com > Security.
+Leave the consent screen in "Testing" and Google ends the access after 7 days; publish it (it
+stays private) to avoid reconnecting.
+
 ### File Check
 
 Drop files or folders onto **File Check** in the dashboard (or click *Choose files…*), or run

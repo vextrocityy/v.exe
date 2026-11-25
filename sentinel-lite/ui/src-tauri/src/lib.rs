@@ -298,6 +298,116 @@ async fn delete_quarantine(id: String) -> Result<(), String> {
     call_privileged(Request::DeleteQuarantine { id }).await.map(|_| ())
 }
 
+/// `%41+b` → `A b` (query-string decoding).
+fn url_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'+' => out.push(b' '),
+            b'%' if i + 2 < b.len() && s.is_char_boundary(i + 1) && s.is_char_boundary(i + 3) => {
+                match u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                    Ok(v) => {
+                        out.push(v);
+                        i += 2;
+                    }
+                    Err(_) => out.push(b'%'),
+                }
+            }
+            c => out.push(c),
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// `GET /?code=..&state=.. HTTP/1.1` → the query's values for `code`, `state`, `error`.
+fn parse_callback(request_line: &str) -> (Option<String>, Option<String>, Option<String>) {
+    let target = request_line.split_whitespace().nth(1).unwrap_or("");
+    let query = target.split_once('?').map(|(_, q)| q).unwrap_or("");
+    let get = |key: &str| {
+        query
+            .split('&')
+            .filter_map(|kv| kv.split_once('='))
+            .find(|(k, _)| *k == key)
+            .map(|(_, v)| url_decode(v))
+    };
+    (get("code"), get("state"), get("error"))
+}
+
+/// Wait (up to 5 minutes) for Google to send the browser back to our one-shot
+/// loopback listener, answer the browser, and return (code, state).
+fn wait_for_google(listener: std::net::TcpListener) -> Result<(String, String), String> {
+    use std::io::{BufRead, BufReader, Write};
+    listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(300);
+    while std::time::Instant::now() < deadline {
+        let (mut stream, _) = match listener.accept() {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(150));
+                continue;
+            }
+            Err(e) => return Err(e.to_string()),
+        };
+        let _ = stream.set_nonblocking(false);
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+        let mut line = String::new();
+        if BufReader::new(&stream).read_line(&mut line).is_err() {
+            continue;
+        }
+        let (code, state, error) = parse_callback(&line);
+        let page = |title: &str, text: &str| {
+            let body = format!(
+                "<!doctype html><meta charset=utf-8><title>Vigil</title><body style=\"font-family:Segoe UI,sans-serif;background:#020617;color:#e2e8f0;padding:3rem\"><h2>{title}</h2><p>{text}</p></body>"
+            );
+            format!("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+        };
+        match (code, state, error) {
+            (Some(code), Some(state), _) => {
+                let _ = stream.write_all(page("Almost done", "Go back to Vigil and approve the administrator prompt. You can close this tab.").as_bytes());
+                return Ok((code, state));
+            }
+            (_, _, Some(_)) => {
+                let _ = stream.write_all(page("Not connected", "Google sign-in was cancelled. You can close this tab.").as_bytes());
+                return Err("Google sign-in was cancelled.".into());
+            }
+            // Anything else (a favicon request, a port scan): not our answer, keep waiting.
+            _ => {
+                let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            }
+        }
+    }
+    Err("Timed out waiting for the Google sign-in. Press Connect Gmail to try again.".into())
+}
+
+/// Email account watch: connect a Gmail mailbox (read-only). Opens Google's
+/// consent page in the browser and waits for it to come back to this PC.
+#[tauri::command]
+async fn gmail_connect(app: AppHandle) -> Result<(), String> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
+    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+    let url = match call(Request::GmailBegin {
+        redirect_uri: format!("http://127.0.0.1:{port}"),
+    })
+    .await?
+    {
+        Response::GmailAuth { url } => url,
+        r => return Err(unexpected(r)),
+    };
+    app.opener().open_url(url, None::<&str>).map_err(|e| e.to_string())?;
+    let (code, state) = tauri::async_runtime::spawn_blocking(move || wait_for_google(listener))
+        .await
+        .map_err(|e| e.to_string())??;
+    call_privileged(Request::GmailFinish { code, state }).await.map(|_| ())
+}
+
+#[tauri::command]
+async fn gmail_disconnect() -> Result<(), String> {
+    call_privileged(Request::GmailDisconnect).await.map(|_| ())
+}
+
 /// Open items that wait for the user's decision.
 #[tauri::command]
 async fn get_attention() -> Result<Vec<SecurityEvent>, String> {
@@ -358,6 +468,8 @@ fn maybe_notify(app: &AppHandle, ev: &SecurityEvent) {
         EventKind::PersistenceChange => ev.severity >= Severity::High,
         // DNS stopped going through Pi-hole.
         EventKind::NetworkAlert => ev.severity >= Severity::High,
+        // New sign-ins, resets and mailbox tampering; routine sign-in codes (Low) stay quiet.
+        EventKind::AccountAlert => ev.severity >= Severity::Medium,
         _ => false,
     };
     if !important {
@@ -570,6 +682,8 @@ pub fn run() {
             list_quarantine,
             restore_quarantine,
             delete_quarantine,
+            gmail_connect,
+            gmail_disconnect,
             get_attention,
             resolve_event,
             allow_file,
@@ -578,4 +692,18 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running Vigil dashboard");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_the_google_callback() {
+        let (code, state, error) = parse_callback("GET /?state=abc123&code=4%2F0Ab_cd-ef&scope=x HTTP/1.1");
+        assert_eq!((code.as_deref(), state.as_deref(), error), (Some("4/0Ab_cd-ef"), Some("abc123"), None));
+        assert_eq!(parse_callback("GET /?error=access_denied&state=s HTTP/1.1").2.as_deref(), Some("access_denied"));
+        assert_eq!(parse_callback("GET /favicon.ico HTTP/1.1"), (None, None, None));
+        assert_eq!(url_decode("a%20b+c%zz%4"), "a b c%zz%4");
+    }
 }

@@ -10,6 +10,7 @@ const FILTERS = {
   system: (e: SecurityEvent) => ["persistence_change", "settings_changed", "signatures_updated", "service_info", "recovery"].includes(e.kind),
   privacy: (e: SecurityEvent) => e.kind === "device_access",
   network: (e: SecurityEvent) => e.kind === "network_alert",
+  accounts: (e: SecurityEvent) => e.kind === "account_alert",
   scans: (e: SecurityEvent) => e.kind.startsWith("scan_"),
 } as const;
 

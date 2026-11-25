@@ -178,6 +178,12 @@ async fn dispatch(engine: &Arc<Engine>, req: Request, peer: &Peer) -> Response {
         Request::RollbackRestore { .. } if !peer.elevated => {
             return elevation_required("overwrites files with older copies from a snapshot");
         }
+        Request::GmailFinish { .. } if !peer.elevated => {
+            return elevation_required("decides which mailbox Vigil watches for account takeovers");
+        }
+        Request::GmailDisconnect if !peer.elevated => {
+            return elevation_required("turns off the email account watch");
+        }
         Request::AllowFile { .. } if !peer.elevated => {
             return elevation_required("tells Vigil to stop reporting a file it found suspicious");
         }
@@ -227,6 +233,22 @@ async fn dispatch(engine: &Arc<Engine>, req: Request, peer: &Peer) -> Response {
     }
     let e = engine.clone();
     let result = match req {
+        Request::GmailBegin { redirect_uri } => Ok(match e.gmail_begin(&redirect_uri) {
+            Ok(url) => Response::GmailAuth { url },
+            Err(m) => Response::error(ErrorCode::BadRequest, m),
+        }),
+        Request::GmailFinish { code, state } => {
+            blocking(move || match e.gmail_finish(&code, &state) {
+                Ok(_) => Response::Ok,
+                Err(m) => Response::error(ErrorCode::BadRequest, m),
+            })
+            .await
+        }
+        Request::GmailDisconnect => blocking(move || {
+            e.gmail_disconnect();
+            Response::Ok
+        })
+        .await,
         Request::GetAttention => {
             blocking(move || match e.db.open_attention() {
                 Ok(v) => Response::Events(v),

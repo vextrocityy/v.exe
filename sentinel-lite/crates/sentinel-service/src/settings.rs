@@ -61,6 +61,15 @@ pub fn sanitize(mut s: Settings) -> Settings {
         .map(|u| u.trim().to_string())
         .filter(|u| crate::engine::appupdate::is_allowed_api_url(u));
     s.trusted_apps.truncate(512);
+    s.gmail_client_id = s
+        .gmail_client_id
+        .take()
+        .map(|c| c.trim().to_string())
+        .filter(|c| crate::engine::mailwatch::valid_client_id(c));
+    s.gmail_client_secret = s.gmail_client_secret.take().map(|c| c.trim().to_string()).filter(|c| {
+        c == sentinel_protocol::SECRET_MASK
+            || (!c.is_empty() && c.len() < 200 && c.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b)))
+    });
     s.pihole_url = s.pihole_url.take().and_then(|u| crate::engine::homenet::normalize_url(&u));
     s.pihole_password = s
         .pihole_password
@@ -92,6 +101,9 @@ pub fn redacted(s: &Settings) -> Settings {
     if out.pihole_password.is_some() {
         out.pihole_password = Some(sentinel_protocol::SECRET_MASK.into());
     }
+    if out.gmail_client_secret.is_some() {
+        out.gmail_client_secret = Some(sentinel_protocol::SECRET_MASK.into());
+    }
     out
 }
 
@@ -102,6 +114,9 @@ pub fn merge_secrets(old: &Settings, mut new: Settings) -> Settings {
     }
     if new.pihole_password.as_deref() == Some(sentinel_protocol::SECRET_MASK) {
         new.pihole_password = old.pihole_password.clone();
+    }
+    if new.gmail_client_secret.as_deref() == Some(sentinel_protocol::SECRET_MASK) {
+        new.gmail_client_secret = old.gmail_client_secret.clone();
     }
     new
 }
@@ -116,7 +131,7 @@ pub fn is_allowed_update_url(u: &str) -> bool {
 /// Empty = the change is neutral or strengthening and needs no elevation.
 pub fn weakenings(old: &Settings, new: &Settings) -> Vec<String> {
     let mut out = Vec::new();
-    let flags: [(&str, bool, bool); 23] = [
+    let flags: [(&str, bool, bool); 24] = [
         ("real-time protection", old.realtime_protection, new.realtime_protection),
         ("Process Guard", old.process_monitor, new.process_monitor),
         ("File Shield", old.file_monitor, new.file_monitor),
@@ -148,6 +163,7 @@ pub fn weakenings(old: &Settings, new: &Settings) -> Vec<String> {
         ("camera / microphone alerts", old.privacy_monitor, new.privacy_monitor),
         ("rollback snapshots", old.rollback_snapshots, new.rollback_snapshots),
         ("the DNS tamper alarm", old.dns_guard, new.dns_guard),
+        ("the email account watch", old.mail_watch, new.mail_watch),
     ];
     for (name, before, after) in flags {
         if before && !after {
@@ -175,6 +191,11 @@ pub fn weakenings(old: &Settings, new: &Settings) -> Vec<String> {
     }
     if new.trusted_apps.iter().any(|t| !old.trusted_apps.contains(t)) {
         out.push("trusts additional programs".into());
+    }
+    if old.gmail_client_id.is_some()
+        && (new.gmail_client_id != old.gmail_client_id || new.gmail_client_secret != old.gmail_client_secret)
+    {
+        out.push("changes the Google sign-in details the email watch depends on".into());
     }
     if old.pihole_url.is_some() && new.pihole_url != old.pihole_url {
         out.push("changes or removes the Pi-hole server".into());

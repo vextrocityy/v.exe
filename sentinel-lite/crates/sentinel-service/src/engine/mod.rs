@@ -6,6 +6,7 @@ pub mod archive;
 pub mod hasher;
 pub mod heuristics;
 pub mod homenet;
+pub mod mailwatch;
 pub mod inspect;
 pub mod netguard;
 pub mod quarantine;
@@ -99,11 +100,36 @@ pub struct Engine {
     restore_running: AtomicBool,
     /// Pi-hole client (kept so its login session is reused) and the last check's result.
     home: Mutex<(Option<Arc<homenet::Pihole>>, HomeNetworkStatus)>,
+    /// Email account watch (Gmail): consent in progress, cached access token, last result.
+    mail: Mutex<MailRuntime>,
     /// Set first thing at shutdown (and when an app update starts installing):
     /// no new scan, snapshot or download may begin after that.
     shutting_down: AtomicBool,
     background_paused_until: Mutex<Option<Instant>>,
     started: Instant,
+}
+
+/// In-memory side of the email account watch.
+#[derive(Default)]
+struct MailRuntime {
+    /// A consent request the dashboard started and has not finished yet.
+    pending: Option<mailwatch::Pending>,
+    /// Access token and when it stops being valid.
+    access: Option<(String, Instant)>,
+    status: MailWatchStatus,
+    endpoints: mailwatch::Endpoints,
+    checking: bool,
+}
+
+impl MailRuntime {
+    fn load(file: &Path) -> Self {
+        let mut rt = Self::default();
+        if let Some(st) = mailwatch::Stored::load(file) {
+            rt.status.connected = true;
+            rt.status.email = Some(st.email);
+        }
+        rt
+    }
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -115,6 +141,7 @@ impl Engine {
         let quarantine = Quarantine::new(paths.quarantine.clone())?;
         let decoys = realtime::decoy::Decoys::load(&db);
         let (events, _) = broadcast::channel(256);
+        let paths_data_gmail = paths.data.join("gmail.json");
         let owned_snapshots = rollback::Owned::load(&paths.data.join("snapshots.json"));
         Ok(Arc::new(Self {
             db,
@@ -144,6 +171,7 @@ impl Engine {
             snapshot_running: AtomicBool::new(false),
             restore_running: AtomicBool::new(false),
             home: Mutex::new((None, HomeNetworkStatus::default())),
+            mail: Mutex::new(MailRuntime::load(&paths_data_gmail)),
             shutting_down: AtomicBool::new(false),
             background_paused_until: Mutex::new(None),
             started: Instant::now(),
@@ -1625,6 +1653,8 @@ impl Engine {
             reasons.push("No threat signatures loaded".to_string());
         }
         let home_network = lock(&self.home).1.clone();
+        let mut mail_watch = lock(&self.mail).status.clone();
+        mail_watch.configured = settings.gmail_client_id.is_some() && settings.gmail_client_secret.is_some();
         if settings.dns_guard && home_network.configured && home_network.dns_filtered == Some(false) {
             reasons.push("DNS is not going through Pi-hole".to_string());
         }
@@ -1664,7 +1694,253 @@ impl Engine {
             last_snapshot: self.last_snapshot(),
             snapshot_error: lock(&self.snapshot_error).clone(),
             home_network,
+            mail_watch,
         }
+    }
+
+    // ----- email account watch (Gmail) -------------------------------------------------
+
+    fn mail_file(&self) -> PathBuf {
+        self.paths.data.join("gmail.json")
+    }
+
+    fn gmail_client(&self) -> Result<(String, String), String> {
+        let s = self.settings();
+        match (s.gmail_client_id, s.gmail_client_secret) {
+            (Some(id), Some(secret)) => Ok((id, secret)),
+            _ => Err("Enter your Google OAuth client ID and secret in Settings first, and save.".into()),
+        }
+    }
+
+    /// Start connecting a mailbox: returns Google's consent URL for the browser.
+    pub fn gmail_begin(&self, redirect_uri: &str) -> Result<String, String> {
+        let (id, _) = self.gmail_client()?;
+        let (pending, url) = mailwatch::begin(&id, redirect_uri).map_err(|e| format!("{e:#}"))?;
+        lock(&self.mail).pending = Some(pending);
+        Ok(url)
+    }
+
+    /// Finish connecting: trade the code for a read-only grant, record the
+    /// mailbox's current settings as the baseline, and mark the security
+    /// emails already there as seen (only new ones are reported).
+    pub fn gmail_finish(&self, code: &str, state: &str) -> Result<String, String> {
+        let (id, secret) = self.gmail_client()?;
+        let (pending, ep) = {
+            let mut m = lock(&self.mail);
+            (m.pending.take(), m.endpoints.clone())
+        };
+        let pending = pending
+            .filter(|p| p.state == state && p.started.elapsed() < std::time::Duration::from_secs(600))
+            .ok_or("This sign-in was not started from Vigil, or it took too long. Press Connect Gmail again.")?;
+        let run = || -> Result<(mailwatch::Stored, String, u64)> {
+            let (refresh_token, access, ttl) = mailwatch::exchange_code(&ep, &id, &secret, code, &pending)?;
+            let mut st = mailwatch::Stored {
+                refresh_token,
+                email: mailwatch::fetch_address(&ep, &access)?,
+                connected_at: now_unix(),
+                baseline: Some(mailwatch::fetch_config(&ep, &access)?),
+                ..Default::default()
+            };
+            for id in mailwatch::list_candidates(&ep, &access)? {
+                st.remember(&id);
+            }
+            st.save(&self.mail_file())?;
+            Ok((st, access, ttl))
+        };
+        let (st, access, ttl) = run().map_err(|e| format!("{e:#}"))?;
+        {
+            let mut m = lock(&self.mail);
+            m.access = Some((access, Instant::now() + std::time::Duration::from_secs(ttl.saturating_sub(120))));
+            m.status = MailWatchStatus {
+                connected: true,
+                email: Some(st.email.clone()),
+                last_check: Some(now_unix()),
+                ..Default::default()
+            };
+        }
+        let b = st.baseline.clone().unwrap_or_default();
+        let hiding = b.filters.iter().filter(|f| mailwatch::filter_is_dangerous(f)).count();
+        self.emit(
+            EventKind::AccountAlert,
+            if hiding > 0 || b.auto_forward.is_some() { Severity::Medium } else { Severity::Info },
+            format!("Watching {} for account takeovers", st.email),
+            Some(format!(
+                "Read-only access; message bodies are never read. Right now this mailbox has {} filter(s) \
+                 ({hiding} of them delete, hide or forward mail), {} forwarding address(es){}. \
+                 Look through them in Gmail settings once: from now on Vigil reports every change.",
+                b.filters.len(),
+                b.forwarding.len(),
+                b.auto_forward.as_deref().map(|a| format!(", and forwards ALL mail to {a}")).unwrap_or_default(),
+            )),
+            None,
+            None,
+        );
+        Ok(st.email)
+    }
+
+    pub fn gmail_disconnect(&self) {
+        let _ = std::fs::remove_file(self.mail_file());
+        {
+            let mut m = lock(&self.mail);
+            m.access = None;
+            m.pending = None;
+            m.status = MailWatchStatus::default();
+        }
+        self.emit(
+            EventKind::AccountAlert,
+            Severity::Medium,
+            "Email account watch disconnected",
+            Some("Vigil forgot its access to the mailbox. To revoke it at Google too: myaccount.google.com > Security > Third-party access.".into()),
+            None,
+            None,
+        );
+    }
+
+    /// Look for new security emails and for changes to the mailbox's filters
+    /// and forwarding. Runs every few minutes from the scheduler.
+    pub fn check_mail(&self) {
+        if !self.settings().mail_watch {
+            return;
+        }
+        let file = self.mail_file();
+        let Some(mut st) = mailwatch::Stored::load(&file) else { return };
+        let ep = {
+            let mut m = lock(&self.mail);
+            if m.checking {
+                return;
+            }
+            m.checking = true;
+            m.endpoints.clone()
+        };
+        let result = self.check_mail_inner(&ep, &mut st);
+        let _ = st.save(&file);
+        let now = now_unix();
+        let previous_error = {
+            let mut m = lock(&self.mail);
+            m.checking = false;
+            let previous = m.status.error.take();
+            m.status.connected = true;
+            m.status.email = Some(st.email.clone());
+            m.status.alerts_today = st.recent.iter().filter(|(t, _)| now - *t <= 86_400).count() as u64;
+            match &result {
+                Ok(()) => m.status.last_check = Some(now),
+                Err(e) => m.status.error = Some(format!("{e:#}")),
+            }
+            previous
+        };
+        if let Err(e) = result {
+            let msg = format!("{e:#}");
+            tracing::warn!(error = %msg, "email account watch check failed");
+            // Lost access is itself worth a decision (an intruder may have revoked it); say it once.
+            if msg.contains("Connect Gmail again") && previous_error.as_deref() != Some(msg.as_str()) {
+                self.emit_attention(
+                    EventKind::AccountAlert,
+                    Severity::High,
+                    "Vigil lost access to your Gmail",
+                    Some(format!("{msg} If you did not remove Vigil's access yourself, check your Google account's security page.")),
+                    None,
+                    None,
+                );
+            }
+        }
+    }
+
+    fn check_mail_inner(&self, ep: &mailwatch::Endpoints, st: &mut mailwatch::Stored) -> Result<()> {
+        let cached = lock(&self.mail).access.clone().filter(|(_, until)| Instant::now() < *until);
+        let access = match cached {
+            Some((token, _)) => token,
+            None => {
+                let (id, secret) = self.gmail_client().map_err(anyhow::Error::msg)?;
+                let (token, ttl) = mailwatch::refresh_access(ep, &id, &secret, &st.refresh_token)?;
+                lock(&self.mail).access =
+                    Some((token.clone(), Instant::now() + std::time::Duration::from_secs(ttl.saturating_sub(120))));
+                token
+            }
+        };
+
+        // 1) Filters, forwarding, send-as: what an intruder changes to hide.
+        let config = mailwatch::fetch_config(ep, &access)?;
+        if let Some(old) = &st.baseline {
+            for change in mailwatch::diff_config(old, &config) {
+                if change.serious {
+                    self.emit_attention(EventKind::AccountAlert, Severity::High, change.title, Some(change.detail), None, None);
+                } else {
+                    self.emit(EventKind::AccountAlert, Severity::Low, change.title, Some(change.detail), None, None);
+                }
+            }
+        }
+        st.baseline = Some(config);
+
+        // 2) Security emails that arrived since the last look.
+        let now = now_unix();
+        for id in mailwatch::list_candidates(ep, &access)? {
+            if st.seen.contains(&id) {
+                continue;
+            }
+            let parsed = mailwatch::parse_message(&mailwatch::fetch_headers(ep, &access, &id)?);
+            st.remember(&id);
+            let Some(a) = parsed.filter(|a| a.received >= st.connected_at - 60) else { continue };
+            let hidden = if a.hidden {
+                " The email was in Trash or Spam: check Gmail's filters, something may be hiding these from you."
+            } else {
+                ""
+            };
+            let quoted = format!("Email from {}: \"{}\".", a.domain, a.subject);
+            use mailwatch::AlertKind::*;
+            match a.kind {
+                Code => {
+                    self.emit(
+                        EventKind::AccountAlert,
+                        Severity::Low,
+                        format!("{}: a sign-in code was requested", a.service),
+                        Some(format!("{quoted} Normal if you are signing in right now. If not, someone has your password for it.{hidden}")),
+                        None,
+                        None,
+                    );
+                    continue; // codes are routine: they do not count towards a burst
+                }
+                NewSignIn => self.emit_attention(
+                    EventKind::AccountAlert,
+                    if a.hidden { Severity::High } else { Severity::Medium },
+                    format!("{}: sign-in from a new device", a.service),
+                    Some(format!("{quoted} If this was not you, change that password now and sign out other devices there.{hidden}")),
+                    None,
+                    None,
+                ),
+                PasswordReset => self.emit_attention(
+                    EventKind::AccountAlert,
+                    if a.hidden { Severity::High } else { Severity::Medium },
+                    format!("{}: a password reset was requested", a.service),
+                    Some(format!("{quoted} If you did not ask for it, do not click its link; someone is trying to get into that account.{hidden}")),
+                    None,
+                    None,
+                ),
+                AccountChanged => self.emit_attention(
+                    EventKind::AccountAlert,
+                    Severity::High,
+                    format!("{}: account details were changed", a.service),
+                    Some(format!("{quoted} If you did not do this, that account is being taken over: recover it now from the service's own site.{hidden}")),
+                    None,
+                    None,
+                ),
+            };
+            if st.note_alert(a.received.max(now - 3600), &a.domain, now) {
+                self.emit_attention(
+                    EventKind::AccountAlert,
+                    Severity::Critical,
+                    "Several of your accounts are being accessed",
+                    Some(
+                        "Security emails from three or more different services arrived within an hour. That is what it \
+                         looks like when someone works through a list of stolen passwords. From a device you trust: \
+                         change your email password first, then the others, and sign out other devices."
+                            .into(),
+                    ),
+                    None,
+                    None,
+                );
+            }
+        }
+        Ok(())
     }
 
     // ----- home network (Pi-hole) ------------------------------------------------------
@@ -2178,6 +2454,81 @@ rule Low_Confidence  { meta: score = 60 strings: $a = "LOW-CONFIDENCE-MARKER" co
             "{titles:?}"
         );
         assert!(suspended, "{titles:?}");
+    }
+
+    #[test]
+    fn email_watch_connects_then_reports_new_alerts_and_hidden_filters() {
+        use serde_json::json;
+        use std::sync::atomic::AtomicUsize;
+        // Phase 0 = the mailbox as it is when connected; 1 = after an intruder got in.
+        static PHASE: AtomicUsize = AtomicUsize::new(0);
+        let base = homenet::tests::fake_pihole(|line, _body| {
+            let after = PHASE.load(Ordering::SeqCst) == 1;
+            let ok = |v: serde_json::Value| (200, v.to_string());
+            if line.starts_with("POST /token") {
+                ok(json!({"access_token": "at", "refresh_token": "rt", "expires_in": 3599, "scope": mailwatch::SCOPE}))
+            } else if line.contains("/profile") {
+                ok(json!({"emailAddress": "conner@example.com"}))
+            } else if line.contains("/settings/filters") && after {
+                ok(json!({"filter": [{"id": "evil", "criteria": {"query": "linkedin OR security"},
+                    "action": {"addLabelIds": ["TRASH"], "removeLabelIds": ["INBOX"]}}]}))
+            } else if line.contains("/settings/") {
+                ok(json!({}))
+            } else if line.contains("/messages?") {
+                ok(if after { json!({"messages": [{"id": "new1"}, {"id": "old1"}]}) } else { json!({"messages": [{"id": "old1"}]}) })
+            } else if line.contains("/messages/new1") {
+                ok(json!({"id": "new1", "internalDate": format!("{}", (now_unix() + 5) * 1000), "labelIds": ["TRASH"],
+                    "payload": {"headers": [
+                        {"name": "From", "value": "LinkedIn <security-noreply@linkedin.com>"},
+                        {"name": "Subject", "value": "Conner, please verify your new device"}]}}))
+            } else {
+                (500, "{}".into()) // old1 was there at connect time: it must never be fetched
+            }
+        });
+        let (_dir, engine) = engine_with_rules(RULES);
+        lock(&engine.mail).endpoints = mailwatch::Endpoints {
+            token: format!("{base}/token"),
+            api: base.clone(),
+        };
+        // No OAuth client configured: connecting is refused with a clear message.
+        assert!(engine.gmail_begin("http://127.0.0.1:9").unwrap_err().contains("client ID"));
+        let mut s = engine.settings();
+        s.gmail_client_id = Some("1-a.apps.googleusercontent.com".into());
+        s.gmail_client_secret = Some("GOCSPX-secret".into());
+        engine.update_settings(s).unwrap();
+        assert_eq!(engine.status().mail_watch, MailWatchStatus { configured: true, ..Default::default() });
+
+        let url = engine.gmail_begin("http://127.0.0.1:9").unwrap();
+        let state = url.split("state=").nth(1).unwrap().split('&').next().unwrap().to_string();
+        assert!(engine.gmail_finish("code", "wrong-state").is_err(), "a forged callback must be refused");
+        let url = engine.gmail_begin("http://127.0.0.1:9").unwrap();
+        let state2 = url.split("state=").nth(1).unwrap().split('&').next().unwrap().to_string();
+        assert_ne!(state, state2);
+        assert_eq!(engine.gmail_finish("code", &state2).unwrap(), "conner@example.com");
+        let st = engine.status().mail_watch;
+        assert!(st.connected && st.email.as_deref() == Some("conner@example.com"));
+
+        // Nothing new yet: a check stays quiet (and does not re-read old mail).
+        engine.check_mail();
+        assert!(engine.db.open_attention().unwrap().is_empty());
+        assert_eq!(engine.status().mail_watch.error, None);
+
+        // The intruder signs in to LinkedIn and adds a filter that bins the evidence.
+        PHASE.store(1, Ordering::SeqCst);
+        engine.check_mail();
+        let open: Vec<String> = engine.db.open_attention().unwrap().into_iter().map(|e| e.title).collect();
+        assert!(open.contains(&"LinkedIn: sign-in from a new device".to_string()), "{open:?}");
+        assert!(open.contains(&"A Gmail filter that hides or forwards mail was added".to_string()), "{open:?}");
+        assert_eq!(engine.status().mail_watch.alerts_today, 1);
+        // The same mail is reported once.
+        engine.check_mail();
+        assert_eq!(engine.db.open_attention().unwrap().len(), open.len());
+
+        // The secret is masked for clients and the grant is forgotten on disconnect.
+        assert_eq!(settings::redacted(&engine.settings()).gmail_client_secret.as_deref(), Some(SECRET_MASK));
+        engine.gmail_disconnect();
+        assert!(!engine.status().mail_watch.connected);
+        assert!(!engine.paths.data.join("gmail.json").exists());
     }
 
     #[test]

@@ -12,7 +12,7 @@ pub const PIPE_NAME: &str = r"\\.\pipe\sentinel_lite_ipc";
 /// Hard upper bound on one frame; protects the service from memory exhaustion.
 pub const MAX_FRAME_BYTES: u32 = 4 * 1024 * 1024;
 /// Bumped on any incompatible change; the UI refuses to talk to a different version.
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 10;
 /// Placeholder sent instead of stored secrets; sending it back means "unchanged".
 pub const SECRET_MASK: &str = "********";
 
@@ -127,6 +127,27 @@ pub struct EngineStatus {
     /// Pi-hole on the home network, as of the last background check.
     #[serde(default)]
     pub home_network: HomeNetworkStatus,
+    /// Email account watch (Gmail), as of the last background check.
+    #[serde(default)]
+    pub mail_watch: MailWatchStatus,
+}
+
+/// State of the Gmail watch: security emails and mailbox-setting changes.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MailWatchStatus {
+    /// An OAuth client ID and secret are set in Settings.
+    pub configured: bool,
+    /// A mailbox is connected (a read-only grant is stored).
+    pub connected: bool,
+    /// Which mailbox.
+    pub email: Option<String>,
+    /// Why the last check failed (access revoked, offline, ...).
+    pub error: Option<String>,
+    /// Unix time of the last successful check.
+    pub last_check: Option<i64>,
+    /// Security emails reported in the last 24 hours.
+    pub alerts_today: u64,
 }
 
 /// State of the home network's Pi-hole and of this PC's DNS.
@@ -298,6 +319,9 @@ pub enum EventKind {
     ServiceInfo,
     /// Home network (Pi-hole / DNS) alerts and actions.
     NetworkAlert,
+    /// A security email about one of the user's online accounts, or a change
+    /// to the mailbox's own settings (Email account watch).
+    AccountAlert,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -407,6 +431,14 @@ pub struct Settings {
     pub dns_guard: bool,
     /// A domain Pi-hole blocks, used to test this PC's DNS.
     pub dns_test_domain: String,
+    /// Email account watch: check the connected Gmail mailbox for security
+    /// emails and for filters / forwarding added behind the user's back.
+    pub mail_watch: bool,
+    /// The user's own Google OAuth client (a free Google Cloud project, type
+    /// "Desktop app"). Needed to connect a mailbox.
+    pub gmail_client_id: Option<String>,
+    /// Masked like other secrets when sent to clients.
+    pub gmail_client_secret: Option<String>,
 }
 
 impl Default for Settings {
@@ -454,6 +486,9 @@ impl Default for Settings {
             pihole_password: None,
             dns_guard: true,
             dns_test_domain: "doubleclick.net".into(),
+            mail_watch: true,
+            gmail_client_id: None,
+            gmail_client_secret: None,
         }
     }
 }
@@ -527,6 +562,19 @@ pub enum Request {
         snapshot_id: String,
         paths: Vec<String>,
     },
+    /// Email account watch: start connecting a Gmail mailbox. `redirect_uri` is
+    /// the dashboard's one-shot loopback listener. Answers with the consent URL.
+    GmailBegin {
+        redirect_uri: String,
+    },
+    /// Finish connecting with the code Google sent back (needs elevation:
+    /// it decides which mailbox is watched).
+    GmailFinish {
+        code: String,
+        state: String,
+    },
+    /// Forget the mailbox and its stored grant (needs elevation).
+    GmailDisconnect,
     /// Open items that need the user's decision, newest first.
     GetAttention,
     /// Mark one open item as handled ("dismiss").
@@ -592,6 +640,8 @@ pub enum Response {
     RollbackDone { restored: u32, failed: Vec<String>, backup_dir: Option<String> },
     DomainSuggestions { domains: Vec<DomainSuggestion>, from: i64, until: i64 },
     DomainsBlocked { added: Vec<String>, failed: Vec<String> },
+    /// The Google consent page to open in the browser.
+    GmailAuth { url: String },
     Ok,
     Error { code: ErrorCode, message: String },
 }

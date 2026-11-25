@@ -55,6 +55,7 @@ export interface EngineStatus {
   last_snapshot: number | null;
   snapshot_error: string | null;
   home_network: HomeNetworkStatus;
+  mail_watch: MailWatchStatus;
 }
 
 /** Pi-hole on the home network, as of the engine's last background check. */
@@ -90,6 +91,16 @@ export interface DomainSuggestions {
 export interface DomainsBlocked {
   added: string[];
   failed: string[];
+}
+
+/** Email account watch (Gmail). */
+export interface MailWatchStatus {
+  configured: boolean;
+  connected: boolean;
+  email: string | null;
+  error: string | null;
+  last_check: number | null;
+  alerts_today: number;
 }
 
 export type Device = "camera" | "microphone";
@@ -155,7 +166,8 @@ export type EventKind =
   | "settings_changed"
   | "signatures_updated"
   | "service_info"
-  | "network_alert";
+  | "network_alert"
+  | "account_alert";
 
 export interface SecurityEvent {
   id: number;
@@ -225,6 +237,10 @@ export interface Settings {
   pihole_password: string | null;
   dns_guard: boolean;
   dns_test_domain: string;
+  mail_watch: boolean;
+  gmail_client_id: string | null;
+  /** Masked as "********" by the service. */
+  gmail_client_secret: string | null;
 }
 
 export type ProcessAction = "resume" | "terminate";

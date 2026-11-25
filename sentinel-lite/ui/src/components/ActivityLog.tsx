@@ -1,5 +1,5 @@
 import { memo, useState } from "react";
-import { Activity, AlertOctagon, Ban, Bug, Camera, Check, Copy, DownloadCloud, FileWarning, FolderOpen, History, Info, KeyRound, Lock, Mic, Network, PauseCircle, ScanLine, Settings2 } from "lucide-react";
+import { Activity, AlertOctagon, Ban, Bug, Camera, Check, Copy, DownloadCloud, FileWarning, FolderOpen, History, Info, KeyRound, Lock, Mail, Mic, Network, PauseCircle, ScanLine, Settings2 } from "lucide-react";
 import { api } from "../lib/api";
 import type { EventKind, SecurityEvent, Severity } from "../lib/types";
 import { shortPath, timeAgo } from "../lib/format";
@@ -22,6 +22,7 @@ export const KIND_ICON: Record<EventKind, typeof Info> = {
   signatures_updated: DownloadCloud,
   service_info: Activity,
   network_alert: Network,
+  account_alert: Mail,
 };
 
 export const SEVERITY: Record<Severity, string> = {

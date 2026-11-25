@@ -296,6 +296,8 @@ fn elevated_request(arg: &str) -> Result<()> {
             | Request::AllowFile { .. }
             | Request::DeleteQuarantine { .. }
             | Request::CreateSnapshot
+            | Request::GmailFinish { .. }
+            | Request::GmailDisconnect
     ) {
         bail!("request type not allowed");
     }

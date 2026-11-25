@@ -49,6 +49,99 @@ function AppUpdateRow({ s, set, status }: { s: Settings; set: Setter; status: En
   );
 }
 
+/** Email account watch: the user's own Google OAuth client, then a read-only connection. */
+function MailWatchPanel({ s, set, status, dirty, toggle }: { s: Settings; set: Setter; status: EngineStatus | null; dirty: boolean; toggle: (key: BoolKey, label: string, hint: string, disabled?: boolean) => ReactNode }) {
+  const [busy, setBusy] = useState<"connect" | "disconnect" | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const mw = status?.mail_watch;
+  const run = async (what: "connect" | "disconnect") => {
+    setBusy(what);
+    setErr(null);
+    try {
+      await (what === "connect" ? api.gmailConnect() : api.gmailDisconnect());
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+  return (
+    <Panel title="Email account watch (Gmail)">
+      <div className="border-b border-slate-800/70 px-5 py-4 text-xs text-slate-400">
+        <p>
+          Vigil checks your Gmail every 5 minutes for security emails from your accounts (new-device sign-ins, password resets, "your email was changed") and for filters or
+          forwarding added behind your back. Access is read-only, message bodies are never read, and nothing leaves this PC.
+        </p>
+        <details className="mt-2">
+          <summary className="cursor-pointer text-cyan-400 hover:text-cyan-300">One-time setup (about 10 minutes)</summary>
+          <ol className="mt-2 list-decimal space-y-1 pl-5">
+            <li>Go to console.cloud.google.com and create a project (any name).</li>
+            <li>APIs &amp; Services → Library → search "Gmail API" → Enable.</li>
+            <li>APIs &amp; Services → OAuth consent screen: External; add your own Gmail address under Test users.</li>
+            <li>APIs &amp; Services → Credentials → Create credentials → OAuth client ID → Application type: Desktop app.</li>
+            <li>On the consent screen's Audience page, press Publish app (it stays private to you). Left in "Testing", Google ends the access every 7 days and Vigil asks you to reconnect.</li>
+            <li>Paste the Client ID and Client secret below, Save, then press Connect Gmail.</li>
+            <li>On Google's page choose your account. It warns that the app is unverified (it is your own project): Continue, then allow "View your email messages and settings".</li>
+          </ol>
+        </details>
+      </div>
+      <div className="border-b border-slate-800/70 px-5 py-4">
+        <label htmlFor="gmail-client-id" className="text-sm text-slate-200">Google OAuth client ID</label>
+        <input
+          id="gmail-client-id"
+          spellCheck={false}
+          value={s.gmail_client_id ?? ""}
+          onChange={(e) => set("gmail_client_id", e.target.value.trim() === "" ? null : e.target.value.trim())}
+          placeholder="1234567890-abc123.apps.googleusercontent.com"
+          className="mt-2 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-sm text-slate-200 placeholder:text-slate-600 focus:border-cyan-500 focus:outline-none"
+        />
+        <label htmlFor="gmail-client-secret" className="mt-3 block text-sm text-slate-200">Client secret</label>
+        <input
+          id="gmail-client-secret"
+          type="password"
+          autoComplete="off"
+          spellCheck={false}
+          value={s.gmail_client_secret ?? ""}
+          onFocus={(e) => e.target.select()}
+          onChange={(e) => {
+            const v = e.target.value.replace(/\*{8}/g, "").trim();
+            set("gmail_client_secret", v === "" ? null : v);
+          }}
+          placeholder="GOCSPX-…"
+          className="mt-2 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-sm text-slate-200 placeholder:text-slate-600 focus:border-cyan-500 focus:outline-none"
+        />
+      </div>
+      <div className="flex items-center justify-between gap-6 border-b border-slate-800/70 px-5 py-4">
+        <div className="min-w-0">
+          <p className="text-sm text-slate-200">
+            {mw?.connected ? <>Connected: <span className="font-mono text-emerald-300">{mw.email}</span></> : "Not connected"}
+          </p>
+          <p className="text-xs text-slate-500">
+            {err ? <span className="text-rose-400">{err}</span>
+              : mw?.error ? <span className="text-amber-400">{mw.error}</span>
+              : busy === "connect" ? "Finish signing in in your browser, then approve the administrator prompt."
+              : mw?.connected ? `Last checked ${mw.last_check ? new Date(mw.last_check * 1000).toLocaleTimeString() : "not yet"} · ${mw.alerts_today} alert(s) in the last 24 hours`
+              : !mw?.configured ? "Enter the client ID and secret above and save first."
+              : dirty ? "Save your changes first."
+              : "Ready to connect."}
+          </p>
+        </div>
+        <div className="flex shrink-0 gap-2">
+          {mw?.connected && (
+            <button onClick={() => run("disconnect")} disabled={!!busy} title="Requires administrator approval" className="rounded-lg border border-slate-700 px-3 py-1.5 text-sm text-slate-300 hover:border-rose-400/50 hover:text-rose-300 disabled:opacity-50">
+              Disconnect
+            </button>
+          )}
+          <button onClick={() => run("connect")} disabled={!!busy || dirty || !mw?.configured} className="rounded-lg bg-cyan-500 px-3 py-1.5 text-sm font-medium text-slate-950 hover:bg-cyan-400 disabled:opacity-40">
+            {busy === "connect" ? "Waiting for Google…" : mw?.connected ? "Reconnect" : "Connect Gmail"}
+          </button>
+        </div>
+      </div>
+      {toggle("mail_watch", "Watch this mailbox", "Turn off to pause the checks without disconnecting.", !mw?.connected)}
+    </Panel>
+  );
+}
+
 export function SettingsPage({ status }: { status: EngineStatus | null }) {
   const [s, setS] = useState<Settings | null>(null);
   const [saved, setSaved] = useState<Settings | null>(null);
@@ -221,6 +314,8 @@ export function SettingsPage({ status }: { status: EngineStatus | null }) {
           <Toggle label="DNS tamper alarm" checked={s.dns_guard} disabled={!s.pihole_url} onChange={(v) => set("dns_guard", v)} />
         </Row>
       </Panel>
+
+      <MailWatchPanel s={s} set={set} status={status} dirty={dirty} toggle={toggle} />
 
       <details className="group">
         <summary className="flex cursor-pointer list-none items-center gap-2 rounded-xl border border-slate-800/80 bg-slate-900/60 px-5 py-3 text-sm text-slate-300 hover:text-slate-100">

@@ -38,6 +38,9 @@ export const api = {
   rollbackPreview: (snapshotId: string, folders: string[] = []) => invoke<RollbackPreview>("rollback_preview", { snapshotId, folders }),
   /** Needs administrator approval; the outcome is reported as a "recovery" event. */
   rollbackRestore: (snapshotId: string, paths: string[]) => invoke<void>("rollback_restore", { snapshotId, paths }),
+  /** Email account watch: opens Google's consent page and waits for it (up to 5 minutes). */
+  gmailConnect: () => invoke<void>("gmail_connect"),
+  gmailDisconnect: () => invoke<void>("gmail_disconnect"),
   /** Open items waiting for a decision, newest first. */
   getAttention: () => invoke<SecurityEvent[]>("get_attention"),
   resolveEvent: (id: number) => invoke<void>("resolve_event", { id }),
