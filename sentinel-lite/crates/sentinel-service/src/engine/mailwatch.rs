@@ -172,9 +172,28 @@ fn oauth_error(body: &str) -> String {
     format!("{code}{}{desc}", if desc.is_empty() { "" } else { ": " })
 }
 
+/// Read a successful answer as JSON. `empty_ok`: an empty body means "nothing
+/// here" (Google answers a list with no entries that way) and reads as `{}`.
+/// Anything else that is not JSON names the step, so a failure can be traced.
+fn read_json(r: ureq::Response, what: &str, empty_ok: bool) -> Result<Value> {
+    let status = r.status();
+    let body = r.into_string().with_context(|| format!("{what}: could not read Google's answer"))?;
+    if body.trim().is_empty() {
+        if empty_ok {
+            return Ok(Value::Object(Default::default()));
+        }
+        bail!("{what}: Google sent an empty answer (HTTP {status})");
+    }
+    serde_json::from_str(&body).map_err(|_| {
+        let start: String = body.chars().filter(|c| !c.is_control()).take(60).collect();
+        anyhow::anyhow!("{what}: Google's answer was not understood (HTTP {status}, starts \"{start}\")")
+    })
+}
+
 fn token_request(ep: &Endpoints, form: &[(&str, &str)]) -> Result<Value> {
-    match agent(&ep.token).post(&ep.token).send_form(form) {
-        Ok(r) => Ok(serde_json::from_str(&r.into_string()?)?),
+    // Plain (uncompressed) answers: one less thing between Google and the parser.
+    match agent(&ep.token).post(&ep.token).set("Accept-Encoding", "identity").send_form(form) {
+        Ok(r) => read_json(r, "signing in", false),
         Err(ureq::Error::Status(_, r)) => {
             let msg = oauth_error(&r.into_string().unwrap_or_default());
             if msg.starts_with("invalid_grant") {
@@ -243,9 +262,10 @@ fn api_get(ep: &Endpoints, access: &str, path: &str) -> Result<Value> {
     match agent(&ep.api)
         .get(&format!("{}{path}", ep.api))
         .set("Authorization", &format!("Bearer {access}"))
+        .set("Accept-Encoding", "identity")
         .call()
     {
-        Ok(r) => Ok(serde_json::from_str(&r.into_string()?)?),
+        Ok(r) => read_json(r, &format!("reading {}", path.split('?').next().unwrap_or(path)), true),
         Err(ureq::Error::Status(code, r)) => {
             let body = r.into_string().unwrap_or_default();
             if code == 403 && (body.contains("has not been used in project") || body.contains("is disabled")) {
@@ -789,6 +809,17 @@ mod tests {
         assert!(err.contains("Connect Gmail again"), "{err}");
 
         assert_eq!(fetch_address(&ep, "at2").unwrap(), "conner@example.com");
+        // An empty answer is an empty list, not a failure; garbage names the step.
+        let empty = crate::engine::homenet::tests::fake_pihole(|line, _| {
+            if line.contains("/profile") { (200, "<html>captive portal</html>".into()) } else { (200, String::new()) }
+        });
+        let ep_empty = Endpoints { token: format!("{empty}/token"), api: empty };
+        assert_eq!(fetch_config(&ep_empty, "at").unwrap(), MailboxConfig::default());
+        assert!(list_candidates(&ep_empty, "at").unwrap().is_empty());
+        let err = fetch_address(&ep_empty, "at").unwrap_err().to_string();
+        assert!(err.contains("reading /profile") && err.contains("captive portal"), "{err}");
+        let err = refresh_access(&ep_empty, "id", "secret", "rt").unwrap_err().to_string();
+        assert!(err.contains("signing in") && err.contains("empty answer"), "{err}");
         // The common setup mistakes come back as instructions, not status codes.
         let off = crate::engine::homenet::tests::fake_pihole(|_, _| {
             (403, json!({"error": {"code": 403, "status": "PERMISSION_DENIED",
